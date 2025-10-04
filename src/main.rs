@@ -223,33 +223,10 @@ fn main() {
     > = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
     let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
 
-    mod vs {
+    mod deferred_vert {
         vulkano_shaders::shader! {
             ty: "vertex",
-            src: "
-            #version 450
-            layout(location = 0) in vec3 position;
-            layout(location = 1) in vec3 normal;
-            layout(location = 2) in vec3 color;
-
-            layout(location = 0) out vec3 out_color;
-            layout(location = 1) out vec3 out_normal;
-            layout(location = 2) out vec3 frag_pos;
-
-            layout(set = 0, binding = 0) uniform MVP_Data {
-                mat4 model;
-                mat4 view;
-                mat4 projection;
-            } uniforms;
-
-            void main() {
-                mat4 worldview = uniforms.view * uniforms.model;
-                gl_Position = uniforms.projection * worldview * vec4(position, 1.0);
-                out_color = color;
-                out_normal = mat3(uniforms.model) * normal;
-                frag_pos = vec3(uniforms.model * vec4(position, 1.0));
-            }
-        ",
+            path: "src/shaders/deferred.vert",
             types_meta: {
                 use bytemuck::{Pod, Zeroable};
 
@@ -257,52 +234,61 @@ fn main() {
             },
         }
     }
-    mod fs {
+
+    mod deferred_frag {
         vulkano_shaders::shader! {
             ty: "fragment",
-            src: "
-            #version 450
-            layout(location = 0) in vec3 in_color;
-            layout(location = 1) in vec3 in_normal;
-            layout(location = 2) in vec3 frag_pos;
+            path: "src/shaders/deferred.frag"
+        }
+    }
 
-            layout(location = 0) out vec4 f_color;
-
-            layout(set = 0, binding = 1) uniform Ambient_Data {
-                vec3 color;
-                float intensity;
-            } ambient;
-
-            layout(set = 0, binding = 2) uniform Directional_Light_Data {
-                vec4 position;
-                vec3 color;
-            } directional;
-
-            void main() {
-                vec3 ambient_color = ambient.intensity * ambient.color;
-                vec3 light_direction = normalize(directional.position.xyz - frag_pos);
-                float directional_intensity = max(dot(in_normal, light_direction), 0.0);
-                vec3 directional_color = directional_intensity * directional.color;
-                vec3 combined_color = (ambient_color + directional_color) * in_color;
-                f_color = vec4(combined_color, 1.0);
-            }
-        ",
+    mod lighting_vert {
+        vulkano_shaders::shader! {
+            ty: "vertex",
+            path: "src/shaders/lighting.vert",
             types_meta: {
                 use bytemuck::{Pod, Zeroable};
 
                 #[derive(Clone, Copy, Zeroable, Pod)]
-            }
+            },
         }
     }
-    let vs = vs::load(device.clone()).unwrap();
-    let fs = fs::load(device.clone()).unwrap();
 
-    let render_pass = vulkano::single_pass_renderpass!(device.clone(),
+    mod lighting_frag {
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            path: "src/shaders/lighting.frag",
+            types_meta: {
+                use bytemuck::{Pod, Zeroable};
+
+                #[derive(Clone, Copy, Zeroable, Pod)]
+            },
+        }
+    }
+
+    let deferred_vert = deferred_vert::load(device.clone()).unwrap();
+    let deferred_frag = deferred_frag::load(device.clone()).unwrap();
+    let lighting_vert = lighting_vert::load(device.clone()).unwrap();
+    let lighting_frag = lighting_frag::load(device.clone()).unwrap();
+
+    let render_pass = vulkano::ordered_passes_renderpass!(device.clone(),
         attachments: {
-            color: {
+            final_color: {
                 load: Clear,
                 store: Store,
                 format: swapchain.image_format(),
+                samples: 1,
+            },
+            color: {
+                load: Clear,
+                store: DontCare,
+                format: Format::A2B10G10R10_UNORM_PACK32,
+                samples: 1,
+            },
+            normals: {
+                load: Clear,
+                store: DontCare,
+                format: Format::R16G16B16A16_SFLOAT,
                 samples: 1,
             },
             depth: {
@@ -312,32 +298,52 @@ fn main() {
                 samples: 1,
             }
         },
-        pass: {
-            color: [color],
-            depth_stencil: {depth}
-        }
+        passes: [
+            {
+                color: [color, normals],
+                depth_stencil: {depth},
+                input: []
+            },
+            {
+                color: [final_color],
+                depth_stencil: {},
+                input: [color, normals]
+            }
+        ]
     )
     .unwrap();
 
-    let pipeline = GraphicsPipeline::start()
+    let deferred_pass = Subpass::from(render_pass.clone(), 0).unwrap();
+    let lighting_pass = Subpass::from(render_pass.clone(), 1).unwrap();
+
+    let deferred_pipeline = GraphicsPipeline::start()
         .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
-        .vertex_shader(vs.entry_point("main").unwrap(), ())
+        .vertex_shader(deferred_vert.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
-        .fragment_shader(fs.entry_point("main").unwrap(), ())
+        .fragment_shader(deferred_frag.entry_point("main").unwrap(), ())
         .depth_stencil_state(DepthStencilState::simple_depth_test())
         .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
-        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+        .render_pass(deferred_pass)
         .build(device.clone())
         .unwrap();
 
-    let uniform_buffer: CpuBufferPool<vs::ty::MVP_Data> =
-        CpuBufferPool::uniform_buffer(memory_allocator.clone());
+    let lighting_pipeline = GraphicsPipeline::start()
+        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_shader(lighting_vert.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
+        .fragment_shader(lighting_frag.entry_point("main").unwrap(), ())
+        .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+        .render_pass(lighting_pass)
+        .build(device.clone())
+        .unwrap();
 
-    let ambient_buffer: CpuBufferPool<fs::ty::Ambient_Data> =
+    let uniform_buffer: CpuBufferPool<deferred_vert::ty::MVP_Data> =
         CpuBufferPool::uniform_buffer(memory_allocator.clone());
-
-    let directional_buffer: CpuBufferPool<fs::ty::Directional_Light_Data> =
+    let ambient_buffer: CpuBufferPool<lighting_frag::ty::Ambient_Data> =
+        CpuBufferPool::uniform_buffer(memory_allocator.clone());
+    let directional_buffer: CpuBufferPool<lighting_frag::ty::Directional_Light_Data> =
         CpuBufferPool::uniform_buffer(memory_allocator.clone());
 
     let vertices = [
@@ -529,7 +535,7 @@ fn main() {
         },
     ];
 
-    let vertex_buffers = CpuAccessibleBuffer::from_iter(
+    let vertex_buffer = CpuAccessibleBuffer::from_iter(
         &memory_allocator,
         BufferUsage {
             vertex_buffer: true,
@@ -546,7 +552,7 @@ fn main() {
         depth_range: 0.0..1.0,
     };
 
-    let mut framebuffers = window_size_dependent_setup(
+    let (mut framebuffers, mut color_buffer, mut normal_buffer) = window_size_dependent_setup(
         &memory_allocator,
         &images,
         render_pass.clone(),
@@ -595,13 +601,19 @@ fn main() {
                     Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
                 };
 
+                let (new_framebuffers, new_color_buffer, new_normal_buffer) =
+                    window_size_dependent_setup(
+                        &memory_allocator,
+                        &new_images,
+                        render_pass.clone(),
+                        &mut viewport,
+                    );
+
                 swapchain = new_swapchain;
-                framebuffers = window_size_dependent_setup(
-                    &memory_allocator,
-                    &new_images,
-                    render_pass.clone(),
-                    &mut viewport,
-                );
+                framebuffers = new_framebuffers;
+                color_buffer = new_color_buffer;
+                normal_buffer = new_normal_buffer;
+
                 recreate_swapchain = false;
             }
 
@@ -619,7 +631,12 @@ fn main() {
                 recreate_swapchain = true;
             }
 
-            let clear_values = vec![Some([0.0, 0.0, 0.0, 1.0].into()), Some(1.0.into())];
+            let clear_values = vec![
+                Some([0.0, 0.0, 0.0, 1.0].into()),
+                Some([0.0, 0.0, 0.0, 1.0].into()),
+                Some([0.0, 0.0, 0.0, 1.0].into()),
+                Some(1.0.into()),
+            ];
 
             let uniform_subbuffer = {
                 let elapsed = rotation_start.elapsed().as_secs() as f64
@@ -642,7 +659,7 @@ fn main() {
                 );
                 model = mvp.model * model;
 
-                let uniform_data = vs::ty::MVP_Data {
+                let uniform_data = deferred_vert::ty::MVP_Data {
                     model: model.into(),
                     view: mvp.view.into(),
                     projection: mvp.projection.into(),
@@ -652,7 +669,7 @@ fn main() {
             };
 
             let ambient_subbuffer = {
-                let uniform_data = fs::ty::Ambient_Data {
+                let uniform_data = lighting_frag::ty::Ambient_Data {
                     color: ambient_light.color.into(),
                     intensity: ambient_light.intensity.into(),
                 };
@@ -661,7 +678,7 @@ fn main() {
             };
 
             let directional_subbuffer = {
-                let uniform_data = fs::ty::Directional_Light_Data {
+                let uniform_data = lighting_frag::ty::Directional_Light_Data {
                     position: directional_light.position.into(),
                     color: directional_light.color.into(),
                 };
@@ -669,14 +686,24 @@ fn main() {
                 directional_buffer.from_data(uniform_data).unwrap()
             };
 
-            let layout = pipeline.layout().set_layouts().get(0).unwrap();
-            let set = PersistentDescriptorSet::new(
+            let deferred_layout = deferred_pipeline.layout().set_layouts().get(0).unwrap();
+            let deferred_set = PersistentDescriptorSet::new(
                 &descriptor_set_allocator,
-                layout.clone(),
+                deferred_layout.clone(),
+                [WriteDescriptorSet::buffer(0, uniform_subbuffer.clone())],
+            )
+            .unwrap();
+
+            let lighting_layout = lighting_pipeline.layout().set_layouts().get(0).unwrap();
+            let lighting_set = PersistentDescriptorSet::new(
+                &descriptor_set_allocator,
+                lighting_layout.clone(),
                 [
-                    WriteDescriptorSet::buffer(0, uniform_subbuffer),
-                    WriteDescriptorSet::buffer(1, ambient_subbuffer),
-                    WriteDescriptorSet::buffer(2, directional_subbuffer),
+                    WriteDescriptorSet::image_view(0, color_buffer.clone()),
+                    WriteDescriptorSet::image_view(1, normal_buffer.clone()),
+                    WriteDescriptorSet::buffer(2, uniform_subbuffer),
+                    WriteDescriptorSet::buffer(3, ambient_subbuffer),
+                    WriteDescriptorSet::buffer(4, directional_subbuffer),
                 ],
             )
             .unwrap();
@@ -700,15 +727,27 @@ fn main() {
                 )
                 .unwrap()
                 .set_viewport(0, [viewport.clone()])
-                .bind_pipeline_graphics(pipeline.clone())
+                .bind_pipeline_graphics(deferred_pipeline.clone())
                 .bind_descriptor_sets(
                     PipelineBindPoint::Graphics,
-                    pipeline.layout().clone(),
+                    deferred_pipeline.layout().clone(),
                     0,
-                    set.clone(),
+                    deferred_set.clone(),
                 )
-                .bind_vertex_buffers(0, vertex_buffers.clone())
-                .draw(vertex_buffers.len() as u32, 1, 0, 0)
+                .bind_vertex_buffers(0, vertex_buffer.clone())
+                .draw(vertex_buffer.len() as u32, 1, 0, 0)
+                .unwrap()
+                .next_subpass(SubpassContents::Inline)
+                .unwrap()
+                .bind_pipeline_graphics(lighting_pipeline.clone())
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    lighting_pipeline.layout().clone(),
+                    0,
+                    lighting_set.clone(),
+                )
+                .bind_vertex_buffers(0, vertex_buffer.clone())
+                .draw(vertex_buffer.len() as u32, 1, 0, 0)
                 .unwrap()
                 .end_render_pass()
                 .unwrap();
@@ -750,26 +789,58 @@ fn window_size_dependent_setup(
     images: &[Arc<SwapchainImage>],
     render_pass: Arc<RenderPass>,
     viewport: &mut Viewport,
-) -> Vec<Arc<Framebuffer>> {
+) -> (
+    Vec<Arc<Framebuffer>>,
+    Arc<ImageView<AttachmentImage>>,
+    Arc<ImageView<AttachmentImage>>,
+) {
     let dimensions = images[0].dimensions().width_height();
     viewport.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
+
     let depth_buffer = ImageView::new_default(
         AttachmentImage::transient(allocator, dimensions, Format::D16_UNORM).unwrap(),
     )
     .unwrap();
 
-    images
+    let color_buffer = ImageView::new_default(
+        AttachmentImage::transient_input_attachment(
+            allocator,
+            dimensions,
+            Format::A2B10G10R10_UNORM_PACK32,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let normal_buffer = ImageView::new_default(
+        AttachmentImage::transient_input_attachment(
+            allocator,
+            dimensions,
+            Format::R16G16B16A16_SFLOAT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let framebuffers = images
         .iter()
         .map(|image| {
             let view = ImageView::new_default(image.clone()).unwrap();
             Framebuffer::new(
                 render_pass.clone(),
                 FramebufferCreateInfo {
-                    attachments: vec![view, depth_buffer.clone()],
+                    attachments: vec![
+                        view,
+                        color_buffer.clone(),
+                        normal_buffer.clone(),
+                        depth_buffer.clone(),
+                    ],
                     ..Default::default()
                 },
             )
             .unwrap()
         })
-        .collect::<Vec<_>>()
+        .collect::<Vec<_>>();
+
+    (framebuffers, color_buffer.clone(), normal_buffer.clone())
 }
