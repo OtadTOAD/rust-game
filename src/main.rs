@@ -25,23 +25,19 @@ fn main() {
         &vec3(0.0, 1.0, 0.0),
     ));
 
-    let mut suzanne1 = Model::new("assets/meshes/Monkey.glb").build();
-    suzanne1.translate(vec3(-5.0, 2.0, -8.0));
-
-    let mut suzanne2 = Model::new("assets/meshes/Monkey.glb").build();
-    suzanne2.translate(vec3(5.0, 2.0, -6.0));
-
-    let mut suzanne3 = Model::new("assets/meshes/Monkey.glb").build();
-    suzanne3.translate(vec3(0.0, -2.0, -5.0));
-
-    let directional_light_r = DirectionalLight::new([-4.0, -4.0, 0.0, -2.0], [1.0, 0.0, 0.0]);
-    let directional_light_g = DirectionalLight::new([4.0, -4.0, 0.0, -2.0], [0.0, 1.0, 0.0]);
-    let directional_light_b = DirectionalLight::new([0.0, 4.0, 0.0, -2.0], [0.0, 0.0, 1.0]);
+    let mut plane = Model::new("assets/meshes/Plane.glb", "assets/textures/diamond.png")
+        .specular(0.5, 12.0)
+        .build();
+    plane.translate(vec3(0.0, 0.0, -3.0));
 
     let rotation_start = Instant::now();
 
+    let mut last_frame_time = Instant::now();
+
     let mut previous_frame_end =
         Some(Box::new(sync::now(system.device.clone())) as Box<dyn GpuFuture>);
+
+    system.preload_textures(&mut plane);
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -63,33 +59,30 @@ fn main() {
                 .unwrap()
                 .cleanup_finished();
 
-            let elapsed = rotation_start.elapsed().as_secs() as f64
-                + rotation_start.elapsed().subsec_nanos() as f64 / 1_000_000_000.0;
-            let elapsed_as_radians = elapsed * pi::<f64>() / 180.0;
+            let current_time = Instant::now();
+            let frame_time = current_time.duration_since(last_frame_time);
+            last_frame_time = current_time;
+            let fps = 1.0 / frame_time.as_secs_f32();
+            println!(
+                "Frame time: {:.2}ms | FPS: {:.1}",
+                frame_time.as_secs_f32() * 1000.0,
+                fps
+            );
 
-            suzanne1.zero_rotation();
-            suzanne1.rotate(elapsed_as_radians as f32 * 50.0, vec3(0.0, 0.0, 1.0));
-            suzanne1.rotate(elapsed_as_radians as f32 * 30.0, vec3(0.0, 1.0, 0.0));
-            suzanne1.rotate(elapsed_as_radians as f32 * 20.0, vec3(1.0, 0.0, 0.0));
+            let elapsed = rotation_start.elapsed().as_secs() as f32
+                + rotation_start.elapsed().subsec_nanos() as f32 / 1_000_000_000.0;
+            let elapsed_as_radians = elapsed * 30.0 * (pi::<f32>() / 180.0);
 
-            suzanne2.zero_rotation();
-            suzanne2.rotate(elapsed_as_radians as f32 * 25.0, vec3(0.0, 0.0, 1.0));
-            suzanne2.rotate(elapsed_as_radians as f32 * 10.0, vec3(0.0, 1.0, 0.0));
-            suzanne2.rotate(elapsed_as_radians as f32 * 60.0, vec3(1.0, 0.0, 0.0));
+            let x: f32 = 2.0 * elapsed_as_radians.cos();
+            let z: f32 = -3.0 + (2.0 * elapsed_as_radians.sin());
 
-            suzanne3.zero_rotation();
-            suzanne3.rotate(elapsed_as_radians as f32 * 5.0, vec3(0.0, 0.0, 1.0));
-            suzanne3.rotate(elapsed_as_radians as f32 * 45.0, vec3(0.0, 1.0, 0.0));
-            suzanne3.rotate(elapsed_as_radians as f32 * 12.0, vec3(1.0, 0.0, 0.0));
+            let directional_light = DirectionalLight::new([x, 0.0, z, 1.0], [1.0, 1.0, 1.0]);
 
             system.start();
-            system.geometry(&mut suzanne1);
-            system.geometry(&mut suzanne2);
-            system.geometry(&mut suzanne3);
+            system.geometry(&mut plane);
             system.ambient();
-            system.directional(&directional_light_r);
-            system.directional(&directional_light_g);
-            system.directional(&directional_light_b);
+            system.directional(&directional_light);
+            system.light_object(&directional_light);
             system.finish(&mut previous_frame_end);
         }
         _ => (),

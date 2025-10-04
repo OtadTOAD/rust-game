@@ -1169,6 +1169,8 @@ dependencies = [
  "bytemuck",
  "gltf",
  "nalgebra-glm",
+ "once_cell",
+ "png 0.17.16",
  "vulkano",
  "vulkano-shaders",
  "vulkano-win",

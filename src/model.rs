@@ -1,5 +1,13 @@
+#![allow(dead_code)]
+
+use std::{io::Cursor, sync::Arc};
+
 use bytemuck::{Pod, Zeroable};
-use nalgebra_glm::{TMat4, TVec3, identity, inverse_transpose, rotate_normalized_axis, translate};
+use nalgebra_glm::{
+    TMat4, TVec3, identity, inverse_transpose, pi, rotate_normalized_axis, scale, translate, vec3,
+};
+use once_cell::sync::Lazy;
+use vulkano::image::{ImageDimensions, ImmutableImage, view::ImageView};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
@@ -7,6 +15,7 @@ pub struct NormalVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 3],
+    pub uv: [f32; 2],
 }
 
 /// A vertex type intended to be used to provide dummy rendering
@@ -52,12 +61,31 @@ impl DummyVertex {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
+pub struct ColoredVertex {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+}
+
+#[derive(Clone)]
+pub struct Texture {
+    pub data: Vec<u8>,
+    pub dimensions: ImageDimensions,
+}
+
 pub struct Model {
     data: Vec<NormalVertex>,
     translation: TMat4<f32>,
     rotation: TMat4<f32>,
+    scale_factor: f32,
     model: TMat4<f32>,
     normals: TMat4<f32>,
+    specular_intensity: f32,
+    shininess: f32,
+
+    pub texture_instance: Option<Arc<ImageView<ImmutableImage>>>,
+    texture: Texture,
 
     // Incase we want to do multiple rotation translations without updating model each time.
     // (Only updating when we request it)
@@ -67,13 +95,27 @@ pub struct Model {
 pub struct ModelBuilder {
     file_name: String,
     custom_color: [f32; 3],
+    scale_factor: f32,
+    specular_intensity: f32,
+    shininess: f32,
+    texture: String,
 }
 
+static DEFAULT_ROTATION: Lazy<TMat4<f32>> = Lazy::new(|| {
+    let default = identity();
+    let default = rotate_normalized_axis(&default, pi(), &vec3(0.0, 0.0, 1.0));
+    default
+});
+
 impl ModelBuilder {
-    fn new(file: String) -> ModelBuilder {
+    fn new(file: String, texture: String) -> ModelBuilder {
         ModelBuilder {
             file_name: file,
             custom_color: [1.0, 0.35, 0.137],
+            scale_factor: 1.0,
+            specular_intensity: 0.5,
+            shininess: 32.0,
+            texture,
         }
     }
 
@@ -103,6 +145,12 @@ impl ModelBuilder {
                     vec![self.custom_color; positions.len()]
                 };
 
+                let uvs: Vec<[f32; 2]> = if let Some(iter) = reader.read_tex_coords(0) {
+                    iter.into_f32().map(|uv| [uv[0], uv[1]]).collect()
+                } else {
+                    vec![[0.0, 0.0]; positions.len()]
+                };
+
                 let indices: Option<Vec<u32>> =
                     reader.read_indices().map(|i| i.into_u32().collect());
 
@@ -114,16 +162,19 @@ impl ModelBuilder {
                             position: positions[tri[2] as usize],
                             normal: normals[tri[2] as usize],
                             color: colors[tri[2] as usize],
+                            uv: uvs[tri[2] as usize],
                         });
                         vertices.push(NormalVertex {
                             position: positions[tri[1] as usize],
                             normal: normals[tri[1] as usize],
                             color: colors[tri[1] as usize],
+                            uv: uvs[tri[1] as usize],
                         });
                         vertices.push(NormalVertex {
                             position: positions[tri[0] as usize],
                             normal: normals[tri[0] as usize],
                             color: colors[tri[0] as usize],
+                            uv: uvs[tri[0] as usize],
                         });
                     }
                 } else {
@@ -132,18 +183,56 @@ impl ModelBuilder {
                             position: positions[i],
                             normal: normals[i],
                             color: colors[i],
+                            uv: uvs[i],
                         });
                     }
                 }
             }
         }
 
+        let (image_data, image_dimensions) = {
+            let png_bytes = std::fs::read(self.texture).unwrap();
+            let cursor = Cursor::new(png_bytes);
+            let decoder = png::Decoder::new(cursor);
+            let mut reader = decoder.read_info().unwrap();
+            let info = reader.info();
+            let image_dimensions = ImageDimensions::Dim2d {
+                width: info.width,
+                height: info.height,
+                array_layers: 1,
+            };
+            let mut image_data = Vec::new();
+            let depth: u32 = match info.bit_depth {
+                png::BitDepth::One => 1,
+                png::BitDepth::Two => 2,
+                png::BitDepth::Four => 4,
+                png::BitDepth::Eight => 8,
+                png::BitDepth::Sixteen => 16,
+            };
+            image_data.resize((info.width * info.height * depth) as usize, 0);
+            reader.next_frame(&mut image_data).unwrap();
+            (image_data, image_dimensions)
+        };
+
+        let texture: Option<Arc<ImageView<_>>> = None;
+
         Model {
             data: vertices,
+            scale_factor: self.scale_factor,
+            specular_intensity: self.specular_intensity,
+            shininess: self.shininess,
+
             translation: nalgebra_glm::identity(),
-            rotation: nalgebra_glm::identity(),
+            rotation: DEFAULT_ROTATION.clone(),
             model: nalgebra_glm::identity(),
             normals: nalgebra_glm::identity(),
+
+            texture_instance: texture,
+            texture: Texture {
+                data: image_data,
+                dimensions: image_dimensions,
+            },
+
             required_update: false,
         }
     }
@@ -157,15 +246,41 @@ impl ModelBuilder {
         self.file_name = file;
         self
     }
+
+    pub fn specular(mut self, specular_intensity: f32, shininess: f32) -> ModelBuilder {
+        self.specular_intensity = specular_intensity;
+        self.shininess = shininess;
+        self
+    }
+
+    pub fn uniform_scale_factor(mut self, scale: f32) -> ModelBuilder {
+        self.scale_factor = scale;
+        self
+    }
 }
 
 impl Model {
-    pub fn new(file_name: &str) -> ModelBuilder {
-        ModelBuilder::new(file_name.into())
+    pub fn new(file_name: &str, texture_name: &str) -> ModelBuilder {
+        ModelBuilder::new(file_name.into(), texture_name.into())
     }
 
     pub fn data(&self) -> Vec<NormalVertex> {
         self.data.clone()
+    }
+
+    pub fn texture_data(&self) -> Texture {
+        self.texture.clone()
+    }
+
+    pub fn color_data(&self) -> Vec<ColoredVertex> {
+        let mut ret: Vec<ColoredVertex> = Vec::new();
+        for v in &self.data {
+            ret.push(ColoredVertex {
+                position: v.position,
+                color: v.color,
+            });
+        }
+        ret
     }
 
     pub fn model_matrix(&mut self) -> TMat4<f32> {
@@ -179,6 +294,10 @@ impl Model {
     pub fn model_matrices(&mut self) -> (TMat4<f32>, TMat4<f32>) {
         if self.required_update {
             self.model = self.translation * self.rotation;
+            self.model = scale(
+                &self.model,
+                &vec3(self.scale_factor, self.scale_factor, self.scale_factor),
+            );
             self.normals = inverse_transpose(self.model);
             self.required_update = false;
         }
@@ -188,6 +307,10 @@ impl Model {
     pub fn rotate(&mut self, radians: f32, v: TVec3<f32>) {
         self.rotation = rotate_normalized_axis(&self.rotation, radians, &v);
         self.required_update = true;
+    }
+
+    pub fn specular(&self) -> (f32, f32) {
+        (self.specular_intensity, self.shininess)
     }
 
     pub fn translate(&mut self, v: TVec3<f32>) {

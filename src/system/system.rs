@@ -1,12 +1,12 @@
-use crate::model::{DummyVertex, Model, NormalVertex};
+use crate::model::{ColoredVertex, DummyVertex, Model, NormalVertex};
 use crate::system::DirectionalLight;
 
 use vulkano::buffer::cpu_pool::CpuBufferPoolSubbuffer;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, CpuBufferPool, TypedBufferAccess};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo,
-    SubpassContents,
+    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
+    PrimaryCommandBufferAbstract, RenderPassBeginInfo, SubpassContents,
 };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
@@ -14,12 +14,17 @@ use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
-use vulkano::image::{AttachmentImage, ImageAccess, SwapchainImage};
+use vulkano::image::{AttachmentImage, ImageAccess, ImmutableImage, MipmapsCount, SwapchainImage};
+use vulkano::instance::debug::{
+    DebugUtilsMessageSeverity, DebugUtilsMessageType, DebugUtilsMessenger,
+    DebugUtilsMessengerCreateInfo,
+};
 use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::graphics::color_blend::{
     AttachmentBlend, BlendFactor, BlendOp, ColorBlendState,
 };
+
 use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
@@ -27,9 +32,10 @@ use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
+use vulkano::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode};
 use vulkano::swapchain::{
-    self, AcquireError, Surface, Swapchain, SwapchainAcquireFuture, SwapchainCreateInfo,
-    SwapchainCreationError, SwapchainPresentInfo,
+    self, AcquireError, PresentMode, Surface, Swapchain, SwapchainAcquireFuture,
+    SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo,
 };
 use vulkano::sync::{self, FlushError, GpuFuture};
 use vulkano::{Version, VulkanLibrary};
@@ -39,13 +45,14 @@ use vulkano_win::VkSurfaceBuild;
 use winit::event_loop::EventLoop;
 use winit::window::{Window, WindowBuilder};
 
-use nalgebra_glm::{TMat4, half_pi, identity, perspective};
+use nalgebra_glm::{TMat4, TVec3, half_pi, identity, inverse, perspective, vec3};
 
 use std::mem;
 use std::sync::Arc;
 
 vulkano::impl_vertex!(DummyVertex, position);
-vulkano::impl_vertex!(NormalVertex, position, normal, color);
+vulkano::impl_vertex!(NormalVertex, position, normal, color, uv);
+vulkano::impl_vertex!(ColoredVertex, position, color);
 
 mod deferred_vert {
     vulkano_shaders::shader! {
@@ -63,6 +70,11 @@ mod deferred_frag {
     vulkano_shaders::shader! {
         ty: "fragment",
         path: "src/system/shaders/deferred.frag",
+        types_meta: {
+            use bytemuck::{Pod, Zeroable};
+
+            #[derive(Clone, Copy, Zeroable, Pod)]
+        },
     }
 }
 
@@ -104,12 +116,32 @@ mod ambient_frag {
     }
 }
 
+mod light_obj_vert {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/system/shaders/light_obj.vert",
+        types_meta: {
+            use bytemuck::{Pod, Zeroable};
+
+            #[derive(Clone, Copy, Zeroable, Pod)]
+        },
+    }
+}
+
+mod light_obj_frag {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/system/shaders/light_obj.frag",
+    }
+}
+
 #[derive(Debug, Clone)]
 enum RenderStage {
     Stopped,
     Deferred,
     Ambient,
     Directional,
+    LightObject,
     NeedsRedraw,
 }
 
@@ -126,6 +158,7 @@ pub struct System {
     deferred_pipeline: Arc<GraphicsPipeline>,
     directional_pipeline: Arc<GraphicsPipeline>,
     ambient_pipeline: Arc<GraphicsPipeline>,
+    light_obj_pipeline: Arc<GraphicsPipeline>,
     vp_buffer: Arc<CpuAccessibleBuffer<deferred_vert::ty::VP_Data>>,
     model_uniform_buffer: CpuBufferPool<deferred_vert::ty::Model_Data>,
     ambient_buffer: Arc<CpuAccessibleBuffer<ambient_frag::ty::Ambient_Data>>,
@@ -136,6 +169,8 @@ pub struct System {
     framebuffers: Vec<Arc<Framebuffer>>,
     color_buffer: Arc<ImageView<AttachmentImage>>,
     normal_buffer: Arc<ImageView<AttachmentImage>>,
+    frag_location_buffer: Arc<ImageView<AttachmentImage>>,
+    specular_buffer: Arc<ImageView<AttachmentImage>>,
     render_stage: RenderStage,
     commands: Option<AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>>,
     image_index: u32,
@@ -146,6 +181,7 @@ pub struct System {
 struct VP {
     view: TMat4<f32>,
     projection: TMat4<f32>,
+    camera_pos: TVec3<f32>,
 }
 
 impl VP {
@@ -153,9 +189,13 @@ impl VP {
         VP {
             view: identity(),
             projection: identity(),
+            camera_pos: vec3(0.0, 0.0, 0.0),
         }
     }
 }
+
+const AMBIENT_COLOR: [f32; 3] = [1.0, 1.0, 1.0];
+const AMBIENT_BRIGHTNESS: f32 = 1.0;
 
 impl System {
     pub fn new(event_loop: &EventLoop<()>) -> System {
@@ -163,17 +203,54 @@ impl System {
             let library = VulkanLibrary::new().unwrap();
             let extensions = vulkano_win::required_extensions(&library);
 
+            let mut layers = vec![];
+            if library
+                .layer_properties()
+                .unwrap()
+                .into_iter()
+                .any(|l| l.name() == "VK_LAYER_KHRONOS_validation")
+            {
+                layers.push("VK_LAYER_KHRONOS_validation".to_string());
+            } else {
+                println!("NO VALIDATION!")
+            }
+
             Instance::new(
                 library,
                 InstanceCreateInfo {
                     enabled_extensions: extensions,
                     enumerate_portability: true, // required for MoltenVK on macOS
                     max_api_version: Some(Version::V1_1),
+                    enabled_layers: layers,
                     ..Default::default()
                 },
             )
             .unwrap()
         };
+
+        unsafe {
+            let mut severity = DebugUtilsMessageSeverity::empty();
+            severity.error = true;
+            severity.verbose = true;
+            severity.warning = true;
+            severity.information = true;
+            let mut debug_type = DebugUtilsMessageType::empty();
+            debug_type.validation = true;
+            debug_type.performance = true;
+            debug_type.general = true;
+
+            let _debug_messenger = DebugUtilsMessenger::new(
+                instance.clone(),
+                DebugUtilsMessengerCreateInfo {
+                    message_severity: severity,
+                    message_type: debug_type,
+                    ..DebugUtilsMessengerCreateInfo::user_callback(Arc::new(|msg| {
+                        println!("[VULKAN {:?}] {}", msg.severity, msg.description);
+                    }))
+                },
+            )
+            .ok();
+        }
 
         let surface = WindowBuilder::new()
             .build_vk_surface(event_loop, instance.clone())
@@ -181,6 +258,7 @@ impl System {
 
         let device_extensions = DeviceExtensions {
             khr_swapchain: true,
+            ext_full_screen_exclusive: true,
             ..DeviceExtensions::empty()
         };
 
@@ -261,6 +339,8 @@ impl System {
                     image_extent,
                     image_usage: usage,
                     composite_alpha: alpha,
+                    present_mode: PresentMode::Immediate,
+                    full_screen_exclusive: swapchain::FullScreenExclusive::Disallowed,
                     ..Default::default()
                 },
             )
@@ -278,6 +358,8 @@ impl System {
         let directional_frag = directional_frag::load(device.clone()).unwrap();
         let ambient_vert = ambient_vert::load(device.clone()).unwrap();
         let ambient_frag = ambient_frag::load(device.clone()).unwrap();
+        let light_obj_vert = light_obj_vert::load(device.clone()).unwrap();
+        let light_obj_frag = light_obj_frag::load(device.clone()).unwrap();
 
         let render_pass = vulkano::ordered_passes_renderpass!(device.clone(),
             attachments: {
@@ -299,6 +381,18 @@ impl System {
                     format: Format::R16G16B16A16_SFLOAT,
                     samples: 1,
                 },
+                frag_location: {
+                    load: Clear,
+                    store: DontCare,
+                    format: Format::R16G16B16A16_SFLOAT,
+                    samples: 1,
+                },
+                specular: {
+                    load: Clear,
+                    store: DontCare,
+                    format: Format::R16G16_SFLOAT,
+                    samples: 1,
+                },
                 depth: {
                     load: Clear,
                     store: DontCare,
@@ -308,14 +402,14 @@ impl System {
             },
             passes: [
                 {
-                    color: [color, normals],
+                    color: [color, normals, frag_location, specular],
                     depth_stencil: {depth},
                     input: []
                 },
                 {
                     color: [final_color],
-                    depth_stencil: {},
-                    input: [color, normals]
+                    depth_stencil: {depth},
+                    input: [color, normals, frag_location, specular]
                 }
             ]
         )
@@ -354,6 +448,7 @@ impl System {
                     },
                 ),
             )
+            .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
             .render_pass(lighting_pass.clone())
             .build(device.clone())
             .unwrap();
@@ -376,6 +471,19 @@ impl System {
                     },
                 ),
             )
+            .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+            .render_pass(lighting_pass.clone())
+            .build(device.clone())
+            .unwrap();
+
+        let light_obj_pipeline = GraphicsPipeline::start()
+            .vertex_input_state(BuffersDefinition::new().vertex::<ColoredVertex>())
+            .vertex_shader(light_obj_vert.entry_point("main").unwrap(), ())
+            .input_assembly_state(InputAssemblyState::new())
+            .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
+            .fragment_shader(light_obj_frag.entry_point("main").unwrap(), ())
+            .depth_stencil_state(DepthStencilState::simple_depth_test())
+            .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
             .render_pass(lighting_pass.clone())
             .build(device.clone())
             .unwrap();
@@ -394,9 +502,6 @@ impl System {
         )
         .unwrap();
 
-        let model_uniform_buffer: CpuBufferPool<deferred_vert::ty::Model_Data> =
-            CpuBufferPool::uniform_buffer(memory_allocator.clone());
-
         let ambient_buffer = CpuAccessibleBuffer::from_data(
             &memory_allocator,
             BufferUsage {
@@ -405,11 +510,14 @@ impl System {
             },
             false,
             ambient_frag::ty::Ambient_Data {
-                color: [1.0, 1.0, 1.0],
-                intensity: 0.1,
+                color: AMBIENT_COLOR,
+                intensity: AMBIENT_BRIGHTNESS,
             },
         )
         .unwrap();
+
+        let model_uniform_buffer: CpuBufferPool<deferred_vert::ty::Model_Data> =
+            CpuBufferPool::uniform_buffer(memory_allocator.clone());
 
         let directional_buffer: CpuBufferPool<directional_frag::ty::Directional_Light_Data> =
             CpuBufferPool::uniform_buffer(memory_allocator.clone());
@@ -439,12 +547,13 @@ impl System {
             depth_range: 0.0..1.0,
         };
 
-        let (framebuffers, color_buffer, normal_buffer) = System::window_size_dependent_setup(
-            &memory_allocator,
-            &images,
-            render_pass.clone(),
-            &mut viewport,
-        );
+        let (framebuffers, color_buffer, normal_buffer, frag_location_buffer, specular_buffer) =
+            System::window_size_dependent_setup(
+                &memory_allocator,
+                &images,
+                render_pass.clone(),
+                &mut viewport,
+            );
 
         let render_stage = RenderStage::Stopped;
 
@@ -465,6 +574,7 @@ impl System {
             deferred_pipeline,
             directional_pipeline,
             ambient_pipeline,
+            light_obj_pipeline,
             vp_buffer,
             model_uniform_buffer,
             ambient_buffer,
@@ -475,6 +585,8 @@ impl System {
             framebuffers,
             color_buffer,
             normal_buffer,
+            frag_location_buffer,
+            specular_buffer,
             render_stage,
             commands,
             image_index,
@@ -551,6 +663,19 @@ impl System {
             }
         }
 
+        let camera_buffer = CpuAccessibleBuffer::from_data(
+            &self.memory_allocator,
+            BufferUsage {
+                uniform_buffer: true,
+                ..BufferUsage::empty()
+            },
+            false,
+            directional_frag::ty::Camera_Data {
+                position: self.vp.camera_pos.into(),
+            },
+        )
+        .unwrap();
+
         let directional_subbuffer =
             self.generate_directional_buffer(&self.directional_buffer, &directional_light);
 
@@ -566,7 +691,10 @@ impl System {
             [
                 WriteDescriptorSet::image_view(0, self.color_buffer.clone()),
                 WriteDescriptorSet::image_view(1, self.normal_buffer.clone()),
-                WriteDescriptorSet::buffer(2, directional_subbuffer.clone()),
+                WriteDescriptorSet::image_view(2, self.frag_location_buffer.clone()),
+                WriteDescriptorSet::image_view(3, self.specular_buffer.clone()),
+                WriteDescriptorSet::buffer(4, directional_subbuffer.clone()),
+                WriteDescriptorSet::buffer(5, camera_buffer.clone()),
             ],
         )
         .unwrap();
@@ -590,6 +718,7 @@ impl System {
     pub fn finish(&mut self, previous_frame_end: &mut Option<Box<dyn GpuFuture>>) {
         match self.render_stage {
             RenderStage::Directional => {}
+            RenderStage::LightObject => {}
             RenderStage::NeedsRedraw => {
                 self.recreate_swapchain();
                 self.commands = None;
@@ -660,6 +789,43 @@ impl System {
         pool.from_data(uniform_data).unwrap()
     }
 
+    pub fn preload_textures(&mut self, model: &mut Model) {
+        if model.texture_instance.is_some() {
+            return;
+        }
+
+        let mut upload_builder = AutoCommandBufferBuilder::primary(
+            &self.command_buffer_allocator,
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        let texture_data = model.texture_data();
+
+        let texture = ImmutableImage::from_iter(
+            &self.memory_allocator,
+            texture_data.data.iter().cloned(),
+            texture_data.dimensions,
+            MipmapsCount::One,
+            Format::R8G8B8A8_SRGB,
+            &mut upload_builder,
+        )
+        .unwrap();
+
+        model.texture_instance = Some(ImageView::new_default(texture).unwrap());
+
+        upload_builder
+            .build()
+            .unwrap()
+            .execute(self.queue.clone())
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+    }
+
     pub fn geometry(&mut self, model: &mut Model) {
         match self.render_stage {
             RenderStage::Deferred => {}
@@ -687,16 +853,49 @@ impl System {
             self.model_uniform_buffer.from_data(uniform_data).unwrap()
         };
 
+        let (intensity, shininess) = model.specular();
+        let specular_buffer = CpuAccessibleBuffer::from_data(
+            &self.memory_allocator,
+            BufferUsage {
+                uniform_buffer: true,
+                ..BufferUsage::empty()
+            },
+            false,
+            deferred_frag::ty::Specular_Data {
+                intensity,
+                shininess,
+            },
+        )
+        .unwrap();
+
+        let sampler = Sampler::new(
+            self.device.clone(),
+            SamplerCreateInfo {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                mipmap_mode: SamplerMipmapMode::Nearest,
+                address_mode: [SamplerAddressMode::Repeat; 3],
+                mip_lod_bias: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
         let model_layout = self
             .deferred_pipeline
             .layout()
             .set_layouts()
             .get(1)
             .unwrap();
+        let texture = model.texture_instance.as_ref().unwrap();
         let model_set = PersistentDescriptorSet::new(
             &self.descriptor_set_allocator,
             model_layout.clone(),
-            [WriteDescriptorSet::buffer(0, model_subbuffer.clone())],
+            [
+                WriteDescriptorSet::buffer(0, model_subbuffer.clone()),
+                WriteDescriptorSet::buffer(1, specular_buffer.clone()),
+                WriteDescriptorSet::image_view_sampler(2, texture.clone(), sampler.clone()),
+            ],
         )
         .unwrap();
 
@@ -727,6 +926,82 @@ impl System {
             .unwrap();
     }
 
+    pub fn light_object(&mut self, directional_light: &DirectionalLight) {
+        match self.render_stage {
+            RenderStage::Directional => {
+                self.render_stage = RenderStage::LightObject;
+            }
+            RenderStage::LightObject => {}
+            RenderStage::NeedsRedraw => {
+                self.recreate_swapchain();
+                self.render_stage = RenderStage::Stopped;
+                self.commands = None;
+                return;
+            }
+            _ => {
+                self.render_stage = RenderStage::Stopped;
+                self.commands = None;
+                return;
+            }
+        }
+
+        let mut model = Model::new("assets/meshes/Sphere.glb", "assets/textures/diamond.png")
+            .color(directional_light.color)
+            .uniform_scale_factor(0.2)
+            .build();
+
+        model.translate(directional_light.get_position());
+
+        let model_subbuffer = {
+            let (model_mat, normal_mat) = model.model_matrices();
+
+            let uniform_data = deferred_vert::ty::Model_Data {
+                model: model_mat.into(),
+                normals: normal_mat.into(),
+            };
+
+            self.model_uniform_buffer.from_data(uniform_data).unwrap()
+        };
+
+        let model_layout = self
+            .light_obj_pipeline
+            .layout()
+            .set_layouts()
+            .get(1)
+            .unwrap();
+        let model_set = PersistentDescriptorSet::new(
+            &self.descriptor_set_allocator,
+            model_layout.clone(),
+            [WriteDescriptorSet::buffer(0, model_subbuffer.clone())],
+        )
+        .unwrap();
+
+        let vertex_buffer = CpuAccessibleBuffer::from_iter(
+            &self.memory_allocator,
+            BufferUsage {
+                vertex_buffer: true,
+                ..BufferUsage::empty()
+            },
+            false,
+            model.color_data().iter().cloned(),
+        )
+        .unwrap();
+
+        self.commands
+            .as_mut()
+            .unwrap()
+            .bind_pipeline_graphics(self.light_obj_pipeline.clone())
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.light_obj_pipeline.layout().clone(),
+                0,
+                (self.vp_set.clone(), model_set.clone()),
+            )
+            .bind_vertex_buffers(0, vertex_buffer.clone())
+            .draw(vertex_buffer.len() as u32, 1, 0, 0)
+            .unwrap();
+    }
+
     #[allow(dead_code)]
     pub fn set_ambient(&mut self, color: [f32; 3], intensity: f32) {
         self.ambient_buffer = CpuAccessibleBuffer::from_data(
@@ -743,6 +1018,8 @@ impl System {
 
     pub fn set_view(&mut self, view: &TMat4<f32>) {
         self.vp.view = view.clone();
+        let look = inverse(&view);
+        self.vp.camera_pos = vec3(look[12], look[13], look[14]);
         self.vp_buffer = CpuAccessibleBuffer::from_data(
             &self.memory_allocator,
             BufferUsage {
@@ -810,6 +1087,8 @@ impl System {
             Some([0.0, 0.0, 0.0, 1.0].into()),
             Some([0.0, 0.0, 0.0, 1.0].into()),
             Some([0.0, 0.0, 0.0, 1.0].into()),
+            Some([0.0, 0.0, 0.0, 1.0].into()),
+            Some([0.0, 0.0].into()),
             Some(1.0.into()),
         ];
 
@@ -861,18 +1140,25 @@ impl System {
             Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
         };
 
-        let (new_framebuffers, new_color_buffer, new_normal_buffer) =
-            System::window_size_dependent_setup(
-                &self.memory_allocator,
-                &new_images,
-                self.render_pass.clone(),
-                &mut self.viewport,
-            );
+        let (
+            new_framebuffers,
+            new_color_buffer,
+            new_normal_buffer,
+            new_frag_location_buffer,
+            new_specular_buffer,
+        ) = System::window_size_dependent_setup(
+            &self.memory_allocator,
+            &new_images,
+            self.render_pass.clone(),
+            &mut self.viewport,
+        );
 
         self.swapchain = new_swapchain;
         self.framebuffers = new_framebuffers;
         self.color_buffer = new_color_buffer;
         self.normal_buffer = new_normal_buffer;
+        self.frag_location_buffer = new_frag_location_buffer;
+        self.specular_buffer = new_specular_buffer;
 
         self.vp_buffer = CpuAccessibleBuffer::from_data(
             &self.memory_allocator,
@@ -913,6 +1199,8 @@ impl System {
         Vec<Arc<Framebuffer>>,
         Arc<ImageView<AttachmentImage>>,
         Arc<ImageView<AttachmentImage>>,
+        Arc<ImageView<AttachmentImage>>,
+        Arc<ImageView<AttachmentImage>>,
     ) {
         let dimensions = images[0].dimensions().width_height();
         viewport.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
@@ -942,6 +1230,26 @@ impl System {
         )
         .unwrap();
 
+        let frag_location_buffer = ImageView::new_default(
+            AttachmentImage::transient_input_attachment(
+                allocator,
+                dimensions,
+                Format::R16G16B16A16_SFLOAT,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let specular_buffer = ImageView::new_default(
+            AttachmentImage::transient_input_attachment(
+                allocator,
+                dimensions,
+                Format::R16G16_SFLOAT,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
         let framebuffers = images
             .iter()
             .map(|image| {
@@ -953,6 +1261,8 @@ impl System {
                             view,
                             color_buffer.clone(),
                             normal_buffer.clone(),
+                            frag_location_buffer.clone(),
+                            specular_buffer.clone(),
                             depth_buffer.clone(),
                         ],
                         ..Default::default()
@@ -962,6 +1272,12 @@ impl System {
             })
             .collect::<Vec<_>>();
 
-        (framebuffers, color_buffer.clone(), normal_buffer.clone())
+        (
+            framebuffers,
+            color_buffer.clone(),
+            normal_buffer.clone(),
+            frag_location_buffer.clone(),
+            specular_buffer.clone(),
+        )
     }
 }
