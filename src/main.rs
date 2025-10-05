@@ -25,10 +25,10 @@ fn main() {
         &vec3(0.0, 1.0, 0.0),
     ));
 
-    let mut plane = Model::new("assets/meshes/Dir_Test.glb", "assets/textures/compass.png")
+    let mut monkey0 = Model::new("assets/meshes/Monkey.glb", "assets/textures/compass.png")
         .specular(0.5, 12.0)
         .build();
-    plane.translate(vec3(0.0, 0.0, -3.0));
+    monkey0.translate(vec3(0.0, 0.0, -3.0));
 
     let rotation_start = Instant::now();
 
@@ -37,7 +37,7 @@ fn main() {
     let mut previous_frame_end =
         Some(Box::new(sync::now(system.device.clone())) as Box<dyn GpuFuture>);
 
-    let mut models = [&mut plane];
+    let mut models = [&mut monkey0];
     system.preload_textures(&mut models);
 
     event_loop.run(move |event, _, control_flow| match event {
@@ -80,7 +80,7 @@ fn main() {
             let directional_light = DirectionalLight::new([x, 0.0, z, 1.0], [1.0, 1.0, 1.0]);
 
             system.start();
-            system.geometry(&mut plane);
+            system.geometry(&mut monkey0);
             system.ambient();
             system.directional(&directional_light);
             system.light_object(&directional_light);
