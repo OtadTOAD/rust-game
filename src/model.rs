@@ -74,8 +74,14 @@ pub struct Texture {
     pub dimensions: ImageDimensions,
 }
 
+#[derive(Clone)]
+pub struct Mesh {
+    pub vertices: Vec<NormalVertex>,
+    pub indices: Vec<u32>,
+}
+
 pub struct Model {
-    data: Vec<NormalVertex>,
+    mesh: Mesh,
     translation: TMat4<f32>,
     rotation: TMat4<f32>,
     scale_factor: f32,
@@ -104,6 +110,8 @@ pub struct ModelBuilder {
 static DEFAULT_ROTATION: Lazy<TMat4<f32>> = Lazy::new(|| {
     let default = identity();
     let default = rotate_normalized_axis(&default, pi(), &vec3(0.0, 0.0, 1.0));
+    let default = rotate_normalized_axis(&default, pi(), &vec3(0.0, 1.0, 0.0));
+
     default
 });
 
@@ -123,69 +131,49 @@ impl ModelBuilder {
         let (gltf, buffers, _) = gltf::import(self.file_name).expect("Failed to open glTF");
 
         let mut vertices: Vec<NormalVertex> = Vec::new();
+        let mut indices = Vec::new();
 
         for mesh in gltf.meshes() {
             for primitive in mesh.primitives() {
                 let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 
+                // Keep in mind because glTF uses diff coord system than Vulkan, we need to flip Z axis
                 let positions: Vec<[f32; 3]> = reader
                     .read_positions()
                     .expect("Mesh has no POSITION attribute")
+                    .map(|[x, y, z]| [x, y, -z])
                     .collect();
-
                 let normals: Vec<[f32; 3]> = if let Some(iter) = reader.read_normals() {
-                    iter.collect()
+                    iter.map(|[x, y, z]| [x, y, -z]).collect()
                 } else {
                     vec![[0.0, 1.0, 0.0]; positions.len()]
                 };
 
-                let colors: Vec<[f32; 3]> = if let Some(iter) = reader.read_colors(0) {
-                    iter.into_rgb_f32().collect()
-                } else {
-                    vec![self.custom_color; positions.len()]
-                };
+                let colors: Vec<[f32; 3]> = reader
+                    .read_colors(0)
+                    .map(|c| c.into_rgb_f32().collect())
+                    .unwrap_or_else(|| vec![self.custom_color; positions.len()]);
 
-                let uvs: Vec<[f32; 2]> = if let Some(iter) = reader.read_tex_coords(0) {
-                    iter.into_f32().map(|uv| [uv[0], uv[1]]).collect()
-                } else {
-                    vec![[0.0, 0.0]; positions.len()]
-                };
+                let uvs: Vec<[f32; 2]> = reader
+                    .read_tex_coords(0)
+                    .map(|t| t.into_f32().collect())
+                    .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
 
-                let indices: Option<Vec<u32>> =
-                    reader.read_indices().map(|i| i.into_u32().collect());
+                let start_index = vertices.len() as u32;
+                for i in 0..positions.len() {
+                    vertices.push(NormalVertex {
+                        position: positions[i],
+                        normal: normals[i],
+                        color: colors[i],
+                        uv: uvs[i],
+                    });
+                }
 
-                if let Some(indices) = indices {
-                    for tri in indices.chunks(3) {
-                        // Currently reversing order because I am flattening this and it doesn't work otherwise
-                        // In future have vertex/index buffers and use that instead
-                        vertices.push(NormalVertex {
-                            position: positions[tri[2] as usize],
-                            normal: normals[tri[2] as usize],
-                            color: colors[tri[2] as usize],
-                            uv: uvs[tri[2] as usize],
-                        });
-                        vertices.push(NormalVertex {
-                            position: positions[tri[1] as usize],
-                            normal: normals[tri[1] as usize],
-                            color: colors[tri[1] as usize],
-                            uv: uvs[tri[1] as usize],
-                        });
-                        vertices.push(NormalVertex {
-                            position: positions[tri[0] as usize],
-                            normal: normals[tri[0] as usize],
-                            color: colors[tri[0] as usize],
-                            uv: uvs[tri[0] as usize],
-                        });
-                    }
+                // Add indices
+                if let Some(read_indices) = reader.read_indices() {
+                    indices.extend(read_indices.into_u32().map(|i| i + start_index));
                 } else {
-                    for i in 0..positions.len() {
-                        vertices.push(NormalVertex {
-                            position: positions[i],
-                            normal: normals[i],
-                            color: colors[i],
-                            uv: uvs[i],
-                        });
-                    }
+                    indices.extend((0..positions.len() as u32).map(|i| i + start_index));
                 }
             }
         }
@@ -217,7 +205,10 @@ impl ModelBuilder {
         let texture: Option<Arc<ImageView<_>>> = None;
 
         Model {
-            data: vertices,
+            mesh: Mesh {
+                vertices: vertices,
+                indices: indices,
+            },
             scale_factor: self.scale_factor,
             specular_intensity: self.specular_intensity,
             shininess: self.shininess,
@@ -264,23 +255,27 @@ impl Model {
         ModelBuilder::new(file_name.into(), texture_name.into())
     }
 
-    pub fn data(&self) -> Vec<NormalVertex> {
-        self.data.clone()
+    pub fn mesh(&self) -> Mesh {
+        self.mesh.clone()
     }
 
     pub fn texture_data(&self) -> Texture {
         self.texture.clone()
     }
 
-    pub fn color_data(&self) -> Vec<ColoredVertex> {
-        let mut ret: Vec<ColoredVertex> = Vec::new();
-        for v in &self.data {
-            ret.push(ColoredVertex {
+    pub fn color_data(&self) -> (Vec<ColoredVertex>, Vec<u32>) {
+        let mut vertices: Vec<ColoredVertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+
+        indices.extend(&self.mesh.indices);
+        for v in &self.mesh.vertices {
+            vertices.push(ColoredVertex {
                 position: v.position,
                 color: v.color,
             });
         }
-        ret
+
+        (vertices, indices)
     }
 
     pub fn model_matrix(&mut self) -> TMat4<f32> {

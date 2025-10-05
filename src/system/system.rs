@@ -195,7 +195,7 @@ impl VP {
 }
 
 const AMBIENT_COLOR: [f32; 3] = [1.0, 1.0, 1.0];
-const AMBIENT_BRIGHTNESS: f32 = 1.0;
+const AMBIENT_BRIGHTNESS: f32 = 0.5;
 
 impl System {
     pub fn new(event_loop: &EventLoop<()>) -> System {
@@ -789,11 +789,7 @@ impl System {
         pool.from_data(uniform_data).unwrap()
     }
 
-    pub fn preload_textures(&mut self, model: &mut Model) {
-        if model.texture_instance.is_some() {
-            return;
-        }
-
+    pub fn preload_textures(&mut self, models: &mut [&mut Model]) {
         let mut upload_builder = AutoCommandBufferBuilder::primary(
             &self.command_buffer_allocator,
             self.queue.queue_family_index(),
@@ -801,19 +797,23 @@ impl System {
         )
         .unwrap();
 
-        let texture_data = model.texture_data();
+        for model in models.iter_mut() {
+            if model.texture_instance.is_some() {
+                continue;
+            }
 
-        let texture = ImmutableImage::from_iter(
-            &self.memory_allocator,
-            texture_data.data.iter().cloned(),
-            texture_data.dimensions,
-            MipmapsCount::One,
-            Format::R8G8B8A8_SRGB,
-            &mut upload_builder,
-        )
-        .unwrap();
-
-        model.texture_instance = Some(ImageView::new_default(texture).unwrap());
+            let texture_data = model.texture_data();
+            let texture = ImmutableImage::from_iter(
+                &self.memory_allocator,
+                texture_data.data.iter().cloned(),
+                texture_data.dimensions,
+                MipmapsCount::One,
+                Format::R8G8B8A8_SRGB,
+                &mut upload_builder,
+            )
+            .unwrap();
+            model.texture_instance = Some(ImageView::new_default(texture).unwrap());
+        }
 
         upload_builder
             .build()
@@ -899,6 +899,7 @@ impl System {
         )
         .unwrap();
 
+        let mesh = model.mesh();
         let vertex_buffer = CpuAccessibleBuffer::from_iter(
             &self.memory_allocator,
             BufferUsage {
@@ -906,7 +907,17 @@ impl System {
                 ..BufferUsage::empty()
             },
             false,
-            model.data().iter().cloned(),
+            mesh.vertices.iter().cloned(),
+        )
+        .unwrap();
+        let index_buffer = CpuAccessibleBuffer::from_iter(
+            &self.memory_allocator,
+            BufferUsage {
+                index_buffer: true,
+                ..BufferUsage::empty()
+            },
+            false,
+            mesh.indices.iter().cloned(),
         )
         .unwrap();
 
@@ -922,7 +933,8 @@ impl System {
                 (self.vp_set.clone(), model_set.clone()),
             )
             .bind_vertex_buffers(0, vertex_buffer.clone())
-            .draw(vertex_buffer.len() as u32, 1, 0, 0)
+            .bind_index_buffer(index_buffer.clone())
+            .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0)
             .unwrap();
     }
 
@@ -976,6 +988,7 @@ impl System {
         )
         .unwrap();
 
+        let (vertex_data, index_data) = model.color_data();
         let vertex_buffer = CpuAccessibleBuffer::from_iter(
             &self.memory_allocator,
             BufferUsage {
@@ -983,7 +996,17 @@ impl System {
                 ..BufferUsage::empty()
             },
             false,
-            model.color_data().iter().cloned(),
+            vertex_data.iter().cloned(),
+        )
+        .unwrap();
+        let index_buffer = CpuAccessibleBuffer::from_iter(
+            &self.memory_allocator,
+            BufferUsage {
+                index_buffer: true,
+                ..BufferUsage::empty()
+            },
+            false,
+            index_data.iter().cloned(),
         )
         .unwrap();
 
@@ -998,7 +1021,8 @@ impl System {
                 (self.vp_set.clone(), model_set.clone()),
             )
             .bind_vertex_buffers(0, vertex_buffer.clone())
-            .draw(vertex_buffer.len() as u32, 1, 0, 0)
+            .bind_index_buffer(index_buffer.clone())
+            .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0)
             .unwrap();
     }
 

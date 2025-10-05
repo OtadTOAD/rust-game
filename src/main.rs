@@ -25,7 +25,7 @@ fn main() {
         &vec3(0.0, 1.0, 0.0),
     ));
 
-    let mut plane = Model::new("assets/meshes/Plane.glb", "assets/textures/diamond.png")
+    let mut plane = Model::new("assets/meshes/Dir_Test.glb", "assets/textures/compass.png")
         .specular(0.5, 12.0)
         .build();
     plane.translate(vec3(0.0, 0.0, -3.0));
@@ -37,7 +37,8 @@ fn main() {
     let mut previous_frame_end =
         Some(Box::new(sync::now(system.device.clone())) as Box<dyn GpuFuture>);
 
-    system.preload_textures(&mut plane);
+    let mut models = [&mut plane];
+    system.preload_textures(&mut models);
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
