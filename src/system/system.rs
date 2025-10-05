@@ -1,4 +1,4 @@
-use crate::model::{ColoredVertex, DummyVertex, Model, NormalVertex};
+use crate::engine::{self, DummyVertex, Engine, Mesh, NormalVertex};
 use crate::system::DirectionalLight;
 
 use vulkano::buffer::cpu_pool::CpuBufferPoolSubbuffer;
@@ -52,7 +52,6 @@ use std::sync::Arc;
 
 vulkano::impl_vertex!(DummyVertex, position);
 vulkano::impl_vertex!(NormalVertex, position, normal, color, uv);
-vulkano::impl_vertex!(ColoredVertex, position, color);
 
 mod deferred_vert {
     vulkano_shaders::shader! {
@@ -116,32 +115,12 @@ mod ambient_frag {
     }
 }
 
-mod light_obj_vert {
-    vulkano_shaders::shader! {
-        ty: "vertex",
-        path: "src/system/shaders/light_obj.vert",
-        types_meta: {
-            use bytemuck::{Pod, Zeroable};
-
-            #[derive(Clone, Copy, Zeroable, Pod)]
-        },
-    }
-}
-
-mod light_obj_frag {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "src/system/shaders/light_obj.frag",
-    }
-}
-
 #[derive(Debug, Clone)]
 enum RenderStage {
     Stopped,
     Deferred,
     Ambient,
     Directional,
-    LightObject,
     NeedsRedraw,
 }
 
@@ -158,7 +137,6 @@ pub struct System {
     deferred_pipeline: Arc<GraphicsPipeline>,
     directional_pipeline: Arc<GraphicsPipeline>,
     ambient_pipeline: Arc<GraphicsPipeline>,
-    light_obj_pipeline: Arc<GraphicsPipeline>,
     vp_buffer: Arc<CpuAccessibleBuffer<deferred_vert::ty::VP_Data>>,
     model_uniform_buffer: CpuBufferPool<deferred_vert::ty::Model_Data>,
     ambient_buffer: Arc<CpuAccessibleBuffer<ambient_frag::ty::Ambient_Data>>,
@@ -358,8 +336,6 @@ impl System {
         let directional_frag = directional_frag::load(device.clone()).unwrap();
         let ambient_vert = ambient_vert::load(device.clone()).unwrap();
         let ambient_frag = ambient_frag::load(device.clone()).unwrap();
-        let light_obj_vert = light_obj_vert::load(device.clone()).unwrap();
-        let light_obj_frag = light_obj_frag::load(device.clone()).unwrap();
 
         let render_pass = vulkano::ordered_passes_renderpass!(device.clone(),
             attachments: {
@@ -476,18 +452,6 @@ impl System {
             .build(device.clone())
             .unwrap();
 
-        let light_obj_pipeline = GraphicsPipeline::start()
-            .vertex_input_state(BuffersDefinition::new().vertex::<ColoredVertex>())
-            .vertex_shader(light_obj_vert.entry_point("main").unwrap(), ())
-            .input_assembly_state(InputAssemblyState::new())
-            .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
-            .fragment_shader(light_obj_frag.entry_point("main").unwrap(), ())
-            .depth_stencil_state(DepthStencilState::simple_depth_test())
-            .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
-            .render_pass(lighting_pass.clone())
-            .build(device.clone())
-            .unwrap();
-
         let vp_buffer = CpuAccessibleBuffer::from_data(
             &memory_allocator,
             BufferUsage {
@@ -574,7 +538,6 @@ impl System {
             deferred_pipeline,
             directional_pipeline,
             ambient_pipeline,
-            light_obj_pipeline,
             vp_buffer,
             model_uniform_buffer,
             ambient_buffer,
@@ -718,7 +681,6 @@ impl System {
     pub fn finish(&mut self, previous_frame_end: &mut Option<Box<dyn GpuFuture>>) {
         match self.render_stage {
             RenderStage::Directional => {}
-            RenderStage::LightObject => {}
             RenderStage::NeedsRedraw => {
                 self.recreate_swapchain();
                 self.commands = None;
@@ -789,7 +751,7 @@ impl System {
         pool.from_data(uniform_data).unwrap()
     }
 
-    pub fn preload_textures(&mut self, models: &mut [&mut Model]) {
+    pub fn preload_textures(&mut self, engine: &mut Engine) {
         let mut upload_builder = AutoCommandBufferBuilder::primary(
             &self.command_buffer_allocator,
             self.queue.queue_family_index(),
@@ -797,12 +759,9 @@ impl System {
         )
         .unwrap();
 
-        for model in models.iter_mut() {
-            if model.texture_instance.is_some() {
-                continue;
-            }
-
-            let texture_data = model.texture_data();
+        let textures = &mut engine.textures;
+        for (mesh_id, mesh_obj) in engine.meshes.iter().enumerate() {
+            let texture_data = &mesh_obj.tex;
             let texture = ImmutableImage::from_iter(
                 &self.memory_allocator,
                 texture_data.data.iter().cloned(),
@@ -812,7 +771,8 @@ impl System {
                 &mut upload_builder,
             )
             .unwrap();
-            model.texture_instance = Some(ImageView::new_default(texture).unwrap());
+            let loaded_texture = ImageView::new_default(texture).unwrap();
+            textures.insert(mesh_id, loaded_texture);
         }
 
         upload_builder
@@ -826,7 +786,12 @@ impl System {
             .unwrap();
     }
 
-    pub fn geometry(&mut self, model: &mut Model) {
+    pub fn geometry(
+        &mut self,
+        instance: &engine::Instance,
+        texture: Arc<ImageView<ImmutableImage>>,
+        mesh: Arc<Mesh>,
+    ) {
         match self.render_stage {
             RenderStage::Deferred => {}
             RenderStage::NeedsRedraw => {
@@ -843,7 +808,7 @@ impl System {
         }
 
         let model_subbuffer = {
-            let (model_mat, normal_mat) = model.model_matrices();
+            let (model_mat, normal_mat) = instance.model_matrices();
 
             let uniform_data = deferred_vert::ty::Model_Data {
                 model: model_mat.into(),
@@ -853,7 +818,7 @@ impl System {
             self.model_uniform_buffer.from_data(uniform_data).unwrap()
         };
 
-        let (intensity, shininess) = model.specular();
+        let (intensity, shininess) = (0.0, 0.0); //model.specular();
         let specular_buffer = CpuAccessibleBuffer::from_data(
             &self.memory_allocator,
             BufferUsage {
@@ -887,7 +852,6 @@ impl System {
             .set_layouts()
             .get(1)
             .unwrap();
-        let texture = model.texture_instance.as_ref().unwrap();
         let model_set = PersistentDescriptorSet::new(
             &self.descriptor_set_allocator,
             model_layout.clone(),
@@ -899,7 +863,6 @@ impl System {
         )
         .unwrap();
 
-        let mesh = model.mesh();
         let vertex_buffer = CpuAccessibleBuffer::from_iter(
             &self.memory_allocator,
             BufferUsage {
@@ -907,7 +870,7 @@ impl System {
                 ..BufferUsage::empty()
             },
             false,
-            mesh.vertices.iter().cloned(),
+            mesh.build.vertices.iter().cloned(),
         )
         .unwrap();
         let index_buffer = CpuAccessibleBuffer::from_iter(
@@ -917,7 +880,7 @@ impl System {
                 ..BufferUsage::empty()
             },
             false,
-            mesh.indices.iter().cloned(),
+            mesh.build.indices.iter().cloned(),
         )
         .unwrap();
 
@@ -929,94 +892,6 @@ impl System {
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
                 self.deferred_pipeline.layout().clone(),
-                0,
-                (self.vp_set.clone(), model_set.clone()),
-            )
-            .bind_vertex_buffers(0, vertex_buffer.clone())
-            .bind_index_buffer(index_buffer.clone())
-            .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0)
-            .unwrap();
-    }
-
-    pub fn light_object(&mut self, directional_light: &DirectionalLight) {
-        match self.render_stage {
-            RenderStage::Directional => {
-                self.render_stage = RenderStage::LightObject;
-            }
-            RenderStage::LightObject => {}
-            RenderStage::NeedsRedraw => {
-                self.recreate_swapchain();
-                self.render_stage = RenderStage::Stopped;
-                self.commands = None;
-                return;
-            }
-            _ => {
-                self.render_stage = RenderStage::Stopped;
-                self.commands = None;
-                return;
-            }
-        }
-
-        let mut model = Model::new("assets/meshes/Sphere.glb", "assets/textures/diamond.png")
-            .color(directional_light.color)
-            .uniform_scale_factor(0.2)
-            .build();
-
-        model.translate(directional_light.get_position());
-
-        let model_subbuffer = {
-            let (model_mat, normal_mat) = model.model_matrices();
-
-            let uniform_data = deferred_vert::ty::Model_Data {
-                model: model_mat.into(),
-                normals: normal_mat.into(),
-            };
-
-            self.model_uniform_buffer.from_data(uniform_data).unwrap()
-        };
-
-        let model_layout = self
-            .light_obj_pipeline
-            .layout()
-            .set_layouts()
-            .get(1)
-            .unwrap();
-        let model_set = PersistentDescriptorSet::new(
-            &self.descriptor_set_allocator,
-            model_layout.clone(),
-            [WriteDescriptorSet::buffer(0, model_subbuffer.clone())],
-        )
-        .unwrap();
-
-        let (vertex_data, index_data) = model.color_data();
-        let vertex_buffer = CpuAccessibleBuffer::from_iter(
-            &self.memory_allocator,
-            BufferUsage {
-                vertex_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            vertex_data.iter().cloned(),
-        )
-        .unwrap();
-        let index_buffer = CpuAccessibleBuffer::from_iter(
-            &self.memory_allocator,
-            BufferUsage {
-                index_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            index_data.iter().cloned(),
-        )
-        .unwrap();
-
-        self.commands
-            .as_mut()
-            .unwrap()
-            .bind_pipeline_graphics(self.light_obj_pipeline.clone())
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                self.light_obj_pipeline.layout().clone(),
                 0,
                 (self.vp_set.clone(), model_set.clone()),
             )

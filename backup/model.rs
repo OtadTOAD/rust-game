@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::{io::Cursor, sync::Arc};
+use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use nalgebra_glm::{
@@ -128,7 +128,7 @@ impl ModelBuilder {
     }
 
     pub fn build(self) -> Model {
-        let (gltf, buffers, _) = gltf::import(self.file_name).expect("Failed to open glTF");
+        let (gltf, buffers, images) = gltf::import(self.file_name).expect("Failed to open glTF");
 
         let mut vertices: Vec<NormalVertex> = Vec::new();
         let mut indices = Vec::new();
@@ -178,28 +178,25 @@ impl ModelBuilder {
             }
         }
 
-        let (image_data, image_dimensions) = {
-            let png_bytes = std::fs::read(self.texture).unwrap();
-            let cursor = Cursor::new(png_bytes);
-            let decoder = png::Decoder::new(cursor);
-            let mut reader = decoder.read_info().unwrap();
-            let info = reader.info();
+        let (image_data, image_dimensions) = if let Some(first_image) = images.first() {
+            let width = first_image.width;
+            let height = first_image.height;
             let image_dimensions = ImageDimensions::Dim2d {
-                width: info.width,
-                height: info.height,
+                width,
+                height,
                 array_layers: 1,
             };
-            let mut image_data = Vec::new();
-            let depth: u32 = match info.bit_depth {
-                png::BitDepth::One => 1,
-                png::BitDepth::Two => 2,
-                png::BitDepth::Four => 4,
-                png::BitDepth::Eight => 8,
-                png::BitDepth::Sixteen => 16,
+
+            (first_image.pixels.clone(), image_dimensions)
+        } else {
+            // No texture available - create a default 1x1 white texture
+            let default_data = vec![255u8; 4]; // 1x1 RGBA white pixel
+            let default_dimensions = ImageDimensions::Dim2d {
+                width: 1,
+                height: 1,
+                array_layers: 1,
             };
-            image_data.resize((info.width * info.height * depth) as usize, 0);
-            reader.next_frame(&mut image_data).unwrap();
-            (image_data, image_dimensions)
+            (default_data, default_dimensions)
         };
 
         let texture: Option<Arc<ImageView<_>>> = None;

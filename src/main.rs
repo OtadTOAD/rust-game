@@ -1,7 +1,6 @@
-mod model;
+mod engine;
 mod system;
 
-use model::Model;
 use system::DirectionalLight;
 use system::System;
 
@@ -13,11 +12,21 @@ use winit::event_loop::{ControlFlow, EventLoop};
 
 use nalgebra_glm::{look_at, pi, vec3};
 
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread;
 use std::time::Instant;
+
+use crate::engine::Engine;
+
+const ENGINE_TICK_RATE: f32 = 60.0;
 
 fn main() {
     let event_loop = EventLoop::new();
     let mut system = System::new(&event_loop);
+
+    // Made this Arc/Mutex because both rendering loop and tick loop need access of this obj
+    let engine = Arc::new(Mutex::new(Engine::new()));
 
     system.set_view(&look_at(
         &vec3(0.0, 0.0, 0.1),
@@ -25,10 +34,12 @@ fn main() {
         &vec3(0.0, 1.0, 0.0),
     ));
 
-    let mut monkey0 = Model::new("assets/meshes/Monkey.glb", "assets/textures/compass.png")
-        .specular(0.5, 12.0)
-        .build();
-    monkey0.translate(vec3(0.0, 0.0, -3.0));
+    {
+        let mut e = engine.lock().unwrap();
+        e.init();
+
+        system.preload_textures(&mut e);
+    }
 
     let rotation_start = Instant::now();
 
@@ -37,9 +48,20 @@ fn main() {
     let mut previous_frame_end =
         Some(Box::new(sync::now(system.device.clone())) as Box<dyn GpuFuture>);
 
-    let mut models = [&mut monkey0];
-    system.preload_textures(&mut models);
+    let engine_for_tick = engine.clone();
+    thread::spawn(move || {
+        let timestep = 1.0 / ENGINE_TICK_RATE;
+        loop {
+            {
+                let mut e = engine_for_tick.lock().unwrap();
+                e.tick(timestep);
+            }
 
+            std::thread::sleep(std::time::Duration::from_secs_f32(timestep));
+        }
+    });
+
+    let engine_for_render = engine.clone();
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
             event: WindowEvent::CloseRequested,
@@ -80,10 +102,16 @@ fn main() {
             let directional_light = DirectionalLight::new([x, 0.0, z, 1.0], [1.0, 1.0, 1.0]);
 
             system.start();
-            system.geometry(&mut monkey0);
+
+            let e = engine_for_render.lock().unwrap();
+            for instance in &e.instances {
+                let tex = Arc::clone(e.textures.get(&instance.model_id).unwrap());
+                let mesh = Arc::clone(&e.meshes[instance.model_id]);
+                system.geometry(instance, tex, mesh);
+            }
+
             system.ambient();
             system.directional(&directional_light);
-            system.light_object(&directional_light);
             system.finish(&mut previous_frame_end);
         }
         _ => (),
