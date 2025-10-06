@@ -1,4 +1,4 @@
-use crate::engine::{self, DrawInstance, DummyVertex, Engine, Mesh, NormalVertex};
+use crate::engine::{DrawInstance, DummyVertex, Engine, Mesh, NormalVertex};
 use crate::system::DirectionalLight;
 
 use vulkano::buffer::cpu_pool::CpuBufferPoolSubbuffer;
@@ -788,7 +788,7 @@ impl System {
 
     pub fn geometry(
         &mut self,
-        instances: &Vec<engine::Instance>,
+        instances: Vec<DrawInstance>,
         texture: Arc<ImageView<ImmutableImage>>,
         mesh: Arc<Mesh>,
     ) {
@@ -807,13 +807,7 @@ impl System {
             }
         }
 
-        let instances_data: Vec<DrawInstance> = instances
-            .iter()
-            .map(|inst| {
-                let (model, normal) = inst.model_matrices();
-                DrawInstance::new(model.into(), normal.into())
-            })
-            .collect();
+        let instance_len = instances.len();
         let instance_buffer = CpuAccessibleBuffer::from_iter(
             &self.memory_allocator,
             BufferUsage {
@@ -821,7 +815,7 @@ impl System {
                 ..BufferUsage::empty()
             },
             false,
-            instances_data.into_iter(),
+            instances.into_iter(),
         )
         .unwrap();
 
@@ -903,7 +897,7 @@ impl System {
             )
             .bind_vertex_buffers(0, (vertex_buffer.clone(), instance_buffer.clone()))
             .bind_index_buffer(index_buffer.clone())
-            .draw_indexed(index_buffer.len() as u32, instances.len() as u32, 0, 0, 0)
+            .draw_indexed(index_buffer.len() as u32, instance_len as u32, 0, 0, 0)
             .unwrap();
     }
 

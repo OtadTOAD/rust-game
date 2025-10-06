@@ -31,8 +31,8 @@ fn main() {
     let engine = Arc::new(Mutex::new(Engine::new()));
 
     system.set_view(&look_at(
-        &vec3(0.0, 0.0, 0.1),
-        &vec3(0.0, 0.0, 0.0),
+        &vec3(0.0, -1.5, 0.1),
+        &vec3(0.0, -1.5, 0.0),
         &vec3(0.0, 1.0, 0.0),
     ));
 
@@ -106,9 +106,10 @@ fn main() {
             system.start();
 
             let e = engine_for_render.lock().unwrap();
-            for (mesh_id, instances) in e.get_read_buffer() {
+            let draw_calls = e.get_draw_calls();
+            for (mesh_id, instances) in draw_calls {
                 let tex = Arc::clone(e.textures.get(&mesh_id).unwrap());
-                let mesh = Arc::clone(&e.meshes[*mesh_id]);
+                let mesh = Arc::clone(&e.meshes[mesh_id]);
                 system.geometry(instances, tex, mesh);
             }
 

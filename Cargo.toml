@@ -12,6 +12,7 @@ vulkano-shaders = "0.32.0"
 vulkano-win = "0.32.0"
 winit = "0.27.3"
 once_cell = "1.21.3"
+hecs = "0.10"
 
 [dependencies.gltf]
 version = "1"

@@ -1,40 +1,41 @@
 use std::{collections::HashMap, sync::Arc};
 
-use nalgebra_glm::vec3;
+use hecs::{Entity, World};
+use nalgebra_glm::{TMat4, Vec3, identity, pi, rotate_normalized_axis, vec3};
+use once_cell::sync::Lazy;
 use vulkano::image::{ImmutableImage, view::ImageView};
 
-use crate::engine::{InputManager, Mesh, instance::Instance};
+use crate::engine::{
+    DrawInstance, InputManager, Mesh,
+    ecs::{Car, MeshID, Transform, car_system},
+};
+
+static DEFAULT_ROTATION: Lazy<TMat4<f32>> = Lazy::new(|| {
+    let default = identity();
+    let default = rotate_normalized_axis(&default, pi(), &vec3(0.0, 0.0, 1.0));
+    let default = rotate_normalized_axis(&default, pi(), &vec3(0.0, 1.0, 0.0));
+
+    default
+});
 
 pub struct Engine {
     pub input_manager: InputManager,
-
     pub meshes: Vec<Arc<Mesh>>,
     pub textures: HashMap<usize, Arc<ImageView<ImmutableImage>>>,
+    pub world: World,
 
-    pub instances_a: HashMap<usize, Vec<Instance>>,
-    pub instances_b: HashMap<usize, Vec<Instance>>,
-    write_buffer: bool,
+    car_entity: Option<Entity>,
 }
 
 impl Engine {
-    pub fn new() -> Engine {
-        let meshes = Vec::new();
-        let textures = HashMap::new();
+    pub fn new() -> Self {
+        Self {
+            input_manager: InputManager::new(),
+            textures: HashMap::new(),
+            world: World::new(),
+            meshes: Vec::new(),
 
-        let instances_a = HashMap::new();
-        let instances_b = HashMap::new();
-
-        let input_manager = InputManager::new();
-
-        Engine {
-            input_manager,
-
-            meshes,
-            textures,
-
-            write_buffer: true,
-            instances_a,
-            instances_b,
+            car_entity: None,
         }
     }
 
@@ -49,70 +50,65 @@ impl Engine {
             }
         }
 
-        let id = self.load_mesh("assets/meshes/Cart.glb");
-        self.spawn_instance(id);
-    }
-
-    pub fn get_read_buffer(&self) -> &HashMap<usize, Vec<Instance>> {
-        if self.write_buffer {
-            &self.instances_b
-        } else {
-            &self.instances_a
-        }
-    }
-
-    pub fn get_write_buffer(&mut self) -> &mut HashMap<usize, Vec<Instance>> {
-        if self.write_buffer {
-            &mut self.instances_a
-        } else {
-            &mut self.instances_b
-        }
-    }
-
-    fn swap_buffers(&mut self) {
-        let (write_buffer, read_buffer) = if self.write_buffer {
-            (&self.instances_a, &mut self.instances_b)
-        } else {
-            (&self.instances_b, &mut self.instances_a)
-        };
-
-        *read_buffer = write_buffer.clone();
-
-        self.write_buffer = !self.write_buffer;
-    }
-
-    pub fn tick(&mut self, _delta: f32) {
-        let write_buffer = self.get_write_buffer();
-
-        for (_, instances) in write_buffer {
-            for inst in instances {
-                inst.rotate_around_axis(_delta, vec3(0.0, 1.0, 0.0));
-                inst.update_matrices();
-            }
-        }
-
-        self.swap_buffers();
+        let car_mesh_id = self.load_mesh("assets/meshes/Cart.glb");
+        self.spawn_car(car_mesh_id, vec3(0.0, 0.0, -6.0));
+        let goal_mesh_id = self.load_mesh("assets/meshes/Goal.glb");
+        self.spawn_instance(goal_mesh_id, vec3(0.0, 0.0, -15.0));
     }
 
     pub fn load_mesh(&mut self, file_path: &str) -> usize {
         let mesh = Mesh::new(file_path);
         let id = self.meshes.len();
         self.meshes.push(Arc::new(mesh));
-
-        self.instances_a.insert(id, Vec::new());
-        self.instances_b.insert(id, Vec::new());
-
         id
     }
 
-    pub fn spawn_instance(&mut self, mesh_id: usize) -> usize {
-        let mut inst = Instance::new();
-        inst.translate(vec3(0.0, 1.5, -5.0));
+    pub fn spawn_instance(&mut self, mesh_id: usize, pos: Vec3) -> Entity {
+        self.world.spawn((
+            Transform {
+                position: pos,
+                rotation: DEFAULT_ROTATION.clone(),
+                scale: vec3(1.0, 1.0, 1.0),
+            },
+            MeshID(mesh_id),
+        ))
+    }
 
-        let write_buffer = self.get_write_buffer();
-        let instances = write_buffer.get_mut(&mesh_id).unwrap();
-        instances.push(inst);
+    pub fn spawn_car(&mut self, mesh_id: usize, pos: Vec3) {
+        let entity = self.world.spawn((
+            Transform {
+                position: pos,
+                rotation: DEFAULT_ROTATION.clone(),
+                scale: vec3(1.0, 1.0, 1.0),
+            },
+            MeshID(mesh_id),
+            Car {
+                velocity: vec3(0.0, 0.0, 0.0),
+                turn_speed: 5.0,
+                speed: 10.0,
+            },
+        ));
+        self.car_entity = Some(entity);
+    }
 
-        instances.len() - 1
+    pub fn get_draw_calls(&self) -> HashMap<usize, Vec<DrawInstance>> {
+        let mut instanced_draw_calls: HashMap<usize, Vec<DrawInstance>> = HashMap::new();
+
+        for (_, (transform, mesh_id)) in self.world.query::<(&Transform, &MeshID)>().iter() {
+            let translation = nalgebra_glm::translation(&transform.position);
+            let scale = nalgebra_glm::scaling(&transform.scale);
+
+            let model_matrix = translation * transform.rotation * scale;
+            let normal_matrix = nalgebra_glm::inverse_transpose(model_matrix);
+
+            let draw_instances = instanced_draw_calls.entry(mesh_id.0).or_default();
+            draw_instances.push(DrawInstance::new(model_matrix, normal_matrix));
+        }
+
+        instanced_draw_calls
+    }
+
+    pub fn tick(&mut self, delta: f32) {
+        car_system(&mut self.world, &self.input_manager, delta);
     }
 }

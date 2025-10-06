@@ -25,10 +25,10 @@ pub struct DrawInstance {
 }
 
 impl DrawInstance {
-    pub fn new(instance_model: [[f32; 4]; 4], instance_normal: [[f32; 4]; 4]) -> Self {
+    pub fn new(instance_model: TMat4<f32>, instance_normal: TMat4<f32>) -> Self {
         Self {
-            instance_model,
-            instance_normal,
+            instance_model: instance_model.into(),
+            instance_normal: instance_normal.into(),
         }
     }
 }
