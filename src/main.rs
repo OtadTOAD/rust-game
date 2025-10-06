@@ -7,6 +7,8 @@ use system::System;
 use vulkano::sync;
 use vulkano::sync::GpuFuture;
 
+use winit::event::ElementState;
+use winit::event::KeyboardInput;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -43,8 +45,6 @@ fn main() {
 
     let rotation_start = Instant::now();
 
-    let mut last_frame_time = Instant::now();
-
     let mut previous_frame_end =
         Some(Box::new(sync::now(system.device.clone())) as Box<dyn GpuFuture>);
 
@@ -63,34 +63,36 @@ fn main() {
 
     let engine_for_render = engine.clone();
     event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } => {
-            *control_flow = ControlFlow::Exit;
-        }
-        Event::WindowEvent {
-            event: WindowEvent::Resized(_),
-            ..
-        } => {
-            system.recreate_swapchain();
-        }
+        Event::WindowEvent { event, .. } => match event {
+            WindowEvent::KeyboardInput {
+                input:
+                    KeyboardInput {
+                        state,
+                        virtual_keycode: Some(keycode),
+                        ..
+                    },
+                ..
+            } => {
+                let mut e = engine_for_render.lock().unwrap();
+                match state {
+                    ElementState::Pressed => e.input_state.press_key(keycode),
+                    ElementState::Released => e.input_state.release_key(keycode),
+                }
+            }
+            WindowEvent::CloseRequested => {
+                *control_flow = ControlFlow::Exit;
+            }
+            WindowEvent::Resized(_) => {
+                system.recreate_swapchain();
+            }
+            _ => {}
+        },
         Event::RedrawEventsCleared => {
             previous_frame_end
                 .as_mut()
                 .take()
                 .unwrap()
                 .cleanup_finished();
-
-            let current_time = Instant::now();
-            let frame_time = current_time.duration_since(last_frame_time);
-            last_frame_time = current_time;
-            let fps = 1.0 / frame_time.as_secs_f32();
-            println!(
-                "Frame time: {:.2}ms | FPS: {:.1}",
-                frame_time.as_secs_f32() * 1000.0,
-                fps
-            );
 
             let elapsed = rotation_start.elapsed().as_secs() as f32
                 + rotation_start.elapsed().subsec_nanos() as f32 / 1_000_000_000.0;
@@ -104,10 +106,10 @@ fn main() {
             system.start();
 
             let e = engine_for_render.lock().unwrap();
-            for (mesh_id, instance) in &e.instances {
+            for (mesh_id, instances) in e.get_read_buffer() {
                 let tex = Arc::clone(e.textures.get(&mesh_id).unwrap());
                 let mesh = Arc::clone(&e.meshes[*mesh_id]);
-                system.geometry(instance, tex, mesh);
+                system.geometry(instances, tex, mesh);
             }
 
             system.ambient();

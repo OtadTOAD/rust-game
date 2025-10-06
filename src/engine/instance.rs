@@ -4,11 +4,10 @@ use bytemuck::{Pod, Zeroable};
 use nalgebra_glm::{Mat4, TMat4, TVec3, Vec3, identity, pi, rotate_normalized_axis, vec3};
 use once_cell::sync::Lazy;
 
+#[derive(Clone)]
 pub struct Instance {
-    pub model_id: usize,
-
-    pub position: Vec3,
     pub rotation: TMat4<f32>,
+    pub position: Vec3,
     pub scale: Vec3,
 
     pub model_matrix: TMat4<f32>,
@@ -43,11 +42,9 @@ static DEFAULT_ROTATION: Lazy<TMat4<f32>> = Lazy::new(|| {
 });
 
 impl Instance {
-    pub fn new(model_id: usize, position: Vec3) -> Self {
+    pub fn new() -> Self {
         let instance = Instance {
-            model_id,
-
-            position,
+            position: vec3(0.0, 0.0, 0.0),
             rotation: DEFAULT_ROTATION.clone(),
             scale: vec3(1.0, 1.0, 1.0),
 
