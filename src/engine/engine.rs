@@ -3,10 +3,10 @@ use std::{collections::HashMap, sync::Arc};
 use nalgebra_glm::vec3;
 use vulkano::image::{ImmutableImage, view::ImageView};
 
-use crate::engine::{InputState, Mesh, instance::Instance};
+use crate::engine::{InputManager, Mesh, instance::Instance};
 
 pub struct Engine {
-    pub input_state: InputState,
+    pub input_manager: InputManager,
 
     pub meshes: Vec<Arc<Mesh>>,
     pub textures: HashMap<usize, Arc<ImageView<ImmutableImage>>>,
@@ -24,10 +24,10 @@ impl Engine {
         let instances_a = HashMap::new();
         let instances_b = HashMap::new();
 
-        let input_state = InputState::new();
+        let input_manager = InputManager::new();
 
         Engine {
-            input_state,
+            input_manager,
 
             meshes,
             textures,

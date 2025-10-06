@@ -4,13 +4,13 @@ use std::collections::HashSet;
 
 use winit::event::VirtualKeyCode;
 
-pub struct InputState {
+pub struct InputManager {
     keys_pressed: HashSet<VirtualKeyCode>,
     keys_just_pressed: HashSet<VirtualKeyCode>,
     keys_just_released: HashSet<VirtualKeyCode>,
 }
 
-impl InputState {
+impl InputManager {
     pub fn new() -> Self {
         Self {
             keys_pressed: HashSet::new(),

@@ -75,8 +75,8 @@ fn main() {
             } => {
                 let mut e = engine_for_render.lock().unwrap();
                 match state {
-                    ElementState::Pressed => e.input_state.press_key(keycode),
-                    ElementState::Released => e.input_state.release_key(keycode),
+                    ElementState::Pressed => e.input_manager.press_key(keycode),
+                    ElementState::Released => e.input_manager.release_key(keycode),
                 }
             }
             WindowEvent::CloseRequested => {

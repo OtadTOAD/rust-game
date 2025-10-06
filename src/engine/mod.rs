@@ -1,10 +1,10 @@
 mod engine;
-mod input_state;
+mod input_manager;
 mod instance;
 mod mesh;
 
 pub use engine::Engine;
-pub use input_state::InputState;
+pub use input_manager::InputManager;
 pub use instance::Instance;
 pub use mesh::Mesh;
 
