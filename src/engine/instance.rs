@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use bytemuck::{Pod, Zeroable};
 use nalgebra_glm::{Mat4, TMat4, TVec3, Vec3, identity, pi, rotate_normalized_axis, vec3};
 use once_cell::sync::Lazy;
 
@@ -14,6 +15,23 @@ pub struct Instance {
     pub normal_matrix: TMat4<f32>,
 
     pub requires_update: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Zeroable, Pod, Default)]
+pub struct DrawInstance {
+    // This is struct used to pass in instance transformation for instancing
+    pub instance_model: [[f32; 4]; 4],
+    pub instance_normal: [[f32; 4]; 4],
+}
+
+impl DrawInstance {
+    pub fn new(instance_model: [[f32; 4]; 4], instance_normal: [[f32; 4]; 4]) -> Self {
+        Self {
+            instance_model,
+            instance_normal,
+        }
+    }
 }
 
 static DEFAULT_ROTATION: Lazy<TMat4<f32>> = Lazy::new(|| {

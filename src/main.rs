@@ -104,9 +104,9 @@ fn main() {
             system.start();
 
             let e = engine_for_render.lock().unwrap();
-            for instance in &e.instances {
-                let tex = Arc::clone(e.textures.get(&instance.model_id).unwrap());
-                let mesh = Arc::clone(&e.meshes[instance.model_id]);
+            for (mesh_id, instance) in &e.instances {
+                let tex = Arc::clone(e.textures.get(&mesh_id).unwrap());
+                let mesh = Arc::clone(&e.meshes[*mesh_id]);
                 system.geometry(instance, tex, mesh);
             }
 

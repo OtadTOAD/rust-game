@@ -1,4 +1,4 @@
-use crate::engine::{self, DummyVertex, Engine, Mesh, NormalVertex};
+use crate::engine::{self, DrawInstance, DummyVertex, Engine, Mesh, NormalVertex};
 use crate::system::DirectionalLight;
 
 use vulkano::buffer::cpu_pool::CpuBufferPoolSubbuffer;
@@ -52,6 +52,7 @@ use std::sync::Arc;
 
 vulkano::impl_vertex!(DummyVertex, position);
 vulkano::impl_vertex!(NormalVertex, position, normal, color, uv);
+vulkano::impl_vertex!(DrawInstance, instance_model, instance_normal);
 
 mod deferred_vert {
     vulkano_shaders::shader! {
@@ -138,7 +139,6 @@ pub struct System {
     directional_pipeline: Arc<GraphicsPipeline>,
     ambient_pipeline: Arc<GraphicsPipeline>,
     vp_buffer: Arc<CpuAccessibleBuffer<deferred_vert::ty::VP_Data>>,
-    model_uniform_buffer: CpuBufferPool<deferred_vert::ty::Model_Data>,
     ambient_buffer: Arc<CpuAccessibleBuffer<ambient_frag::ty::Ambient_Data>>,
     directional_buffer: CpuBufferPool<directional_frag::ty::Directional_Light_Data>,
     dummy_verts: Arc<CpuAccessibleBuffer<[DummyVertex]>>,
@@ -395,7 +395,11 @@ impl System {
         let lighting_pass = Subpass::from(render_pass.clone(), 1).unwrap();
 
         let deferred_pipeline = GraphicsPipeline::start()
-            .vertex_input_state(BuffersDefinition::new().vertex::<NormalVertex>())
+            .vertex_input_state(
+                BuffersDefinition::new()
+                    .vertex::<NormalVertex>()
+                    .instance::<DrawInstance>(),
+            )
             .vertex_shader(deferred_vert.entry_point("main").unwrap(), ())
             .input_assembly_state(InputAssemblyState::new())
             .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
@@ -480,9 +484,6 @@ impl System {
         )
         .unwrap();
 
-        let model_uniform_buffer: CpuBufferPool<deferred_vert::ty::Model_Data> =
-            CpuBufferPool::uniform_buffer(memory_allocator.clone());
-
         let directional_buffer: CpuBufferPool<directional_frag::ty::Directional_Light_Data> =
             CpuBufferPool::uniform_buffer(memory_allocator.clone());
 
@@ -539,7 +540,6 @@ impl System {
             directional_pipeline,
             ambient_pipeline,
             vp_buffer,
-            model_uniform_buffer,
             ambient_buffer,
             directional_buffer,
             dummy_verts,
@@ -788,7 +788,7 @@ impl System {
 
     pub fn geometry(
         &mut self,
-        instance: &engine::Instance,
+        instances: &Vec<engine::Instance>,
         texture: Arc<ImageView<ImmutableImage>>,
         mesh: Arc<Mesh>,
     ) {
@@ -807,16 +807,23 @@ impl System {
             }
         }
 
-        let model_subbuffer = {
-            let (model_mat, normal_mat) = instance.model_matrices();
-
-            let uniform_data = deferred_vert::ty::Model_Data {
-                model: model_mat.into(),
-                normals: normal_mat.into(),
-            };
-
-            self.model_uniform_buffer.from_data(uniform_data).unwrap()
-        };
+        let instances_data: Vec<DrawInstance> = instances
+            .iter()
+            .map(|inst| {
+                let (model, normal) = inst.model_matrices();
+                DrawInstance::new(model.into(), normal.into())
+            })
+            .collect();
+        let instance_buffer = CpuAccessibleBuffer::from_iter(
+            &self.memory_allocator,
+            BufferUsage {
+                vertex_buffer: true,
+                ..BufferUsage::empty()
+            },
+            false,
+            instances_data.into_iter(),
+        )
+        .unwrap();
 
         let (intensity, shininess) = (0.0, 0.0); //model.specular();
         let specular_buffer = CpuAccessibleBuffer::from_data(
@@ -856,7 +863,6 @@ impl System {
             &self.descriptor_set_allocator,
             model_layout.clone(),
             [
-                WriteDescriptorSet::buffer(0, model_subbuffer.clone()),
                 WriteDescriptorSet::buffer(1, specular_buffer.clone()),
                 WriteDescriptorSet::image_view_sampler(2, texture.clone(), sampler.clone()),
             ],
@@ -895,9 +901,9 @@ impl System {
                 0,
                 (self.vp_set.clone(), model_set.clone()),
             )
-            .bind_vertex_buffers(0, vertex_buffer.clone())
+            .bind_vertex_buffers(0, (vertex_buffer.clone(), instance_buffer.clone()))
             .bind_index_buffer(index_buffer.clone())
-            .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0)
+            .draw_indexed(index_buffer.len() as u32, instances.len() as u32, 0, 0, 0)
             .unwrap();
     }
 
