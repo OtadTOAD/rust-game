@@ -1028,7 +1028,7 @@ impl System {
         let image_extent: [u32; 2] = window.inner_size().into();
 
         let aspect_ratio = image_extent[0] as f32 / image_extent[1] as f32;
-        self.vp.projection = perspective(aspect_ratio, half_pi(), 0.01, 100.0);
+        self.vp.projection = perspective(aspect_ratio, half_pi(), 0.01, 300.0);
 
         let (new_swapchain, new_images) = match self.swapchain.recreate(SwapchainCreateInfo {
             image_extent,

@@ -12,12 +12,11 @@ use winit::event::KeyboardInput;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 
-use nalgebra_glm::{look_at, pi, vec3};
+use nalgebra_glm::{look_at, vec3};
 
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
-use std::time::Instant;
 
 use crate::engine::Engine;
 
@@ -43,8 +42,6 @@ fn main() {
         system.preload_textures(&mut e);
     }
 
-    let rotation_start = Instant::now();
-
     let mut previous_frame_end =
         Some(Box::new(sync::now(system.device.clone())) as Box<dyn GpuFuture>);
 
@@ -60,6 +57,8 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_secs_f32(timestep));
         }
     });
+
+    let sun_light = DirectionalLight::new([100.0, -100.0, 100.0, 1.0], [1.0, 1.0, 1.0]);
 
     let engine_for_render = engine.clone();
     event_loop.run(move |event, _, control_flow| match event {
@@ -94,18 +93,15 @@ fn main() {
                 .unwrap()
                 .cleanup_finished();
 
-            let elapsed = rotation_start.elapsed().as_secs() as f32
-                + rotation_start.elapsed().subsec_nanos() as f32 / 1_000_000_000.0;
-            let elapsed_as_radians = elapsed * 30.0 * (pi::<f32>() / 180.0);
+            let mut e = engine_for_render.lock().unwrap();
 
-            let x: f32 = 2.0 * elapsed_as_radians.cos();
-            let z: f32 = -3.0 + (2.0 * elapsed_as_radians.sin());
-
-            let directional_light = DirectionalLight::new([x, 0.0, z, 1.0], [1.0, 1.0, 1.0]);
+            if e.camera.requires_update {
+                e.camera.requires_update = false;
+                system.set_view(&e.camera.view);
+            }
 
             system.start();
 
-            let e = engine_for_render.lock().unwrap();
             let draw_calls = e.get_draw_calls();
             for (mesh_id, instances) in draw_calls {
                 let tex = Arc::clone(e.textures.get(&mesh_id).unwrap());
@@ -114,7 +110,7 @@ fn main() {
             }
 
             system.ambient();
-            system.directional(&directional_light);
+            system.directional(&sun_light);
             system.finish(&mut previous_frame_end);
         }
         _ => (),

@@ -18,12 +18,19 @@ static DEFAULT_ROTATION: Lazy<TMat4<f32>> = Lazy::new(|| {
     default
 });
 
+pub struct Camera {
+    pub view: TMat4<f32>,
+    pub camera_pos: Vec3,
+    pub requires_update: bool,
+}
+
 pub struct Engine {
     pub input_manager: InputManager,
     pub meshes: Vec<Arc<Mesh>>,
     pub textures: HashMap<usize, Arc<ImageView<ImmutableImage>>>,
     pub world: World,
 
+    pub camera: Camera,
     car_entity: Option<Entity>,
 }
 
@@ -35,6 +42,11 @@ impl Engine {
             world: World::new(),
             meshes: Vec::new(),
 
+            camera: Camera {
+                view: identity(),
+                camera_pos: vec3(0.0, 0.0, 0.0),
+                requires_update: false,
+            },
             car_entity: None,
         }
     }
@@ -54,6 +66,8 @@ impl Engine {
         self.spawn_car(car_mesh_id, vec3(0.0, 0.0, -6.0));
         let goal_mesh_id = self.load_mesh("assets/meshes/Goal.glb");
         self.spawn_instance(goal_mesh_id, vec3(0.0, 0.0, -15.0));
+        let map_mesh_id = self.load_mesh("assets/meshes/Map.glb");
+        self.spawn_instance(map_mesh_id, vec3(0.0, 0.0, 0.0));
     }
 
     pub fn load_mesh(&mut self, file_path: &str) -> usize {
@@ -84,8 +98,8 @@ impl Engine {
             MeshID(mesh_id),
             Car {
                 velocity: vec3(0.0, 0.0, 0.0),
-                turn_speed: 5.0,
-                speed: 10.0,
+                turn_speed: 1.5,
+                speed: 20.0,
             },
         ));
         self.car_entity = Some(entity);
@@ -110,5 +124,33 @@ impl Engine {
 
     pub fn tick(&mut self, delta: f32) {
         car_system(&mut self.world, &self.input_manager, delta);
+
+        if let Some(car_entity) = self.car_entity {
+            if let Ok(query) = self
+                .world
+                .query_one_mut::<(&mut Car, &mut Transform)>(car_entity)
+            {
+                let (_car, transform) = query;
+
+                let offset_back = -transform.rotation.column(2).xyz() * -5.0;
+                let offset_up = vec3(0.0, -3.0, 0.0);
+                let desired_pos = transform.position + offset_back + offset_up;
+
+                let lerp_factor = 5.0 * delta;
+                let camera_pos =
+                    self.camera.camera_pos + (desired_pos - self.camera.camera_pos) * lerp_factor;
+
+                let forward_dir = -transform.rotation.column(2).xyz();
+                let look_ahead_distance = 5.0; // how far in front to look
+                let target_pos = transform.position + forward_dir * look_ahead_distance;
+
+                let view_matrix: TMat4<f32> =
+                    nalgebra_glm::look_at(&camera_pos, &target_pos, &vec3(0.0, 1.0, 0.0));
+
+                self.camera.camera_pos = camera_pos;
+                self.camera.view = view_matrix;
+                self.camera.requires_update = true;
+            }
+        }
     }
 }
