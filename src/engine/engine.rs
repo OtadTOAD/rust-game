@@ -1,13 +1,16 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 
 use hecs::{Entity, World};
-use nalgebra_glm::{TMat4, Vec3, identity, pi, rotate_normalized_axis, vec3};
+use nalgebra_glm::{TMat4, Vec3, identity, pi, rotate_normalized_axis, rotation, vec3};
 use once_cell::sync::Lazy;
-use vulkano::image::{ImmutableImage, view::ImageView};
 
 use crate::engine::{
-    DrawInstance, InputManager, Mesh,
-    ecs::{Car, MeshID, Transform, car_system},
+    DrawInstance, InputManager, Mesh, Skybox,
+    ecs::{Car, MaterialID, MeshID, Transform, car_system},
+    material::Material,
 };
 
 static DEFAULT_ROTATION: Lazy<TMat4<f32>> = Lazy::new(|| {
@@ -26,9 +29,10 @@ pub struct Camera {
 
 pub struct Engine {
     pub input_manager: InputManager,
-    pub meshes: Vec<Arc<Mesh>>,
-    pub textures: HashMap<usize, Arc<ImageView<ImmutableImage>>>,
+    pub meshes: HashMap<usize, Arc<Mesh>>,
+    pub materials: HashMap<usize, Arc<RwLock<Material>>>,
     pub world: World,
+    pub skybox: Skybox,
 
     pub camera: Camera,
     car_entity: Option<Entity>,
@@ -38,10 +42,12 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             input_manager: InputManager::new(),
-            textures: HashMap::new(),
-            world: World::new(),
-            meshes: Vec::new(),
+            materials: HashMap::new(),
+            meshes: HashMap::new(),
 
+            world: World::new(),
+
+            skybox: Skybox::new("assets/HDR/puresky.exr"),
             camera: Camera {
                 view: identity(),
                 camera_pos: vec3(0.0, 0.0, 0.0),
@@ -52,42 +58,51 @@ impl Engine {
     }
 
     pub fn init(&mut self) {
-        // Just to make debug and release files work with debugger
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                if exe_dir.ends_with("debug") || exe_dir.ends_with("release") {
-                    let project_root = exe_dir.parent().unwrap().parent().unwrap();
-                    let _ = std::env::set_current_dir(project_root);
-                }
-            }
+        self.load_material(0, "material_cube");
+        self.load_mesh(0, "Material_Test");
+
+        let entity = self.spawn_instance(0, 0, vec3(0.0, -1.5, -3.0));
+        if let Ok(transform) = self.world.query_one_mut::<&mut Transform>(entity) {
+            let rotation = rotate_normalized_axis(
+                &transform.rotation,
+                pi::<f32>() * 0.5,
+                &vec3(0.0, 1.0, 0.0),
+            );
+            transform.rotation = rotation;
         }
 
+        /*
         let car_mesh_id = self.load_mesh("assets/meshes/Cart.glb");
         self.spawn_car(car_mesh_id, vec3(0.0, 0.0, -6.0));
         let goal_mesh_id = self.load_mesh("assets/meshes/Goal.glb");
         self.spawn_instance(goal_mesh_id, vec3(0.0, 0.0, -15.0));
         let map_mesh_id = self.load_mesh("assets/meshes/Map.glb");
-        self.spawn_instance(map_mesh_id, vec3(0.0, 0.0, 0.0));
+        self.spawn_instance(map_mesh_id, vec3(0.0, 0.0, 0.0));*/
     }
 
-    pub fn load_mesh(&mut self, file_path: &str) -> usize {
+    pub fn load_material(&mut self, material_id: usize, file_name: &str) {
+        let material = Arc::new(RwLock::new(Material::new(file_name)));
+        self.materials.insert(material_id.into(), material.clone());
+    }
+
+    pub fn load_mesh(&mut self, mesh_id: usize, file_path: &str) {
         let mesh = Mesh::new(file_path);
-        let id = self.meshes.len();
-        self.meshes.push(Arc::new(mesh));
-        id
+        self.meshes.insert(mesh_id, Arc::new(mesh));
     }
 
-    pub fn spawn_instance(&mut self, mesh_id: usize, pos: Vec3) -> Entity {
+    pub fn spawn_instance(&mut self, mesh_id: usize, material_id: usize, pos: Vec3) -> Entity {
         self.world.spawn((
             Transform {
                 position: pos,
                 rotation: DEFAULT_ROTATION.clone(),
                 scale: vec3(1.0, 1.0, 1.0),
             },
+            MaterialID(material_id),
             MeshID(mesh_id),
         ))
     }
 
+    #[allow(dead_code)]
     pub fn spawn_car(&mut self, mesh_id: usize, pos: Vec3) {
         let entity = self.world.spawn((
             Transform {
@@ -105,17 +120,23 @@ impl Engine {
         self.car_entity = Some(entity);
     }
 
-    pub fn get_draw_calls(&self) -> HashMap<usize, Vec<DrawInstance>> {
-        let mut instanced_draw_calls: HashMap<usize, Vec<DrawInstance>> = HashMap::new();
+    pub fn get_draw_calls(&self) -> HashMap<(usize, usize), Vec<DrawInstance>> {
+        let mut instanced_draw_calls: HashMap<(usize, usize), Vec<DrawInstance>> = HashMap::new();
 
-        for (_, (transform, mesh_id)) in self.world.query::<(&Transform, &MeshID)>().iter() {
+        for (_, (transform, mesh_id, material_id)) in self
+            .world
+            .query::<(&Transform, &MeshID, &MaterialID)>()
+            .iter()
+        {
             let translation = nalgebra_glm::translation(&transform.position);
             let scale = nalgebra_glm::scaling(&transform.scale);
 
             let model_matrix = translation * transform.rotation * scale;
             let normal_matrix = nalgebra_glm::inverse_transpose(model_matrix);
 
-            let draw_instances = instanced_draw_calls.entry(mesh_id.0).or_default();
+            let draw_instances = instanced_draw_calls
+                .entry((mesh_id.0, material_id.0))
+                .or_default();
             draw_instances.push(DrawInstance::new(model_matrix, normal_matrix));
         }
 
@@ -124,6 +145,12 @@ impl Engine {
 
     pub fn tick(&mut self, delta: f32) {
         car_system(&mut self.world, &self.input_manager, delta);
+
+        for (_entity, transform) in self.world.query_mut::<&mut Transform>() {
+            let mut test = rotation(delta, &vec3(0.0, 1.0, 0.0));
+            test *= rotation(delta, &vec3(1.0, 0.0, 0.0));
+            transform.rotation = test * transform.rotation;
+        }
 
         if let Some(car_entity) = self.car_entity {
             if let Ok(query) = self

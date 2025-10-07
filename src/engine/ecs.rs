@@ -11,6 +11,8 @@ pub struct Transform {
 
 pub struct MeshID(pub usize);
 
+pub struct MaterialID(pub usize);
+
 pub struct Car {
     pub velocity: Vec3,
     pub speed: f32,

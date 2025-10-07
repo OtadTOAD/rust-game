@@ -10,7 +10,7 @@ use vulkano::image::ImageDimensions;
 pub struct NormalVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
-    pub color: [f32; 3],
+    pub tangent: [f32; 4],
     pub uv: [f32; 2],
 }
 
@@ -71,7 +71,6 @@ pub struct Build {
 
 pub struct Mesh {
     pub build: Build,
-    pub tex: Texture,
 }
 
 static DEFAULT_COLOR: [f32; 3] = [1.0, 0.35, 0.137];
@@ -85,7 +84,8 @@ static DEFAULT_ROTATION: Lazy<TMat4<f32>> = Lazy::new(|| {
 
 impl Mesh {
     pub fn new(file_path: &str) -> Mesh {
-        let (gltf, buffers, images) = gltf::import(file_path).expect("Failed to open glTF");
+        let mesh_path = format!("assets/meshes/{}.glb", file_path);
+        let (gltf, buffers, _) = gltf::import(mesh_path).expect("Failed to open glTF");
 
         let mut vertices: Vec<NormalVertex> = Vec::new();
         let mut indices = Vec::new();
@@ -106,10 +106,11 @@ impl Mesh {
                     vec![[0.0, 1.0, 0.0]; positions.len()]
                 };
 
-                let colors: Vec<[f32; 3]> = reader
-                    .read_colors(0)
-                    .map(|c| c.into_rgb_f32().collect())
-                    .unwrap_or_else(|| vec![DEFAULT_COLOR; positions.len()]);
+                let tangents: Vec<[f32; 4]> = if let Some(iter) = reader.read_tangents() {
+                    iter.map(|[x, y, z, w]| [x, y, -z, w]).collect()
+                } else {
+                    vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]
+                };
 
                 let uvs: Vec<[f32; 2]> = reader
                     .read_tex_coords(0)
@@ -121,7 +122,7 @@ impl Mesh {
                     vertices.push(NormalVertex {
                         position: positions[i],
                         normal: normals[i],
-                        color: colors[i],
+                        tangent: tangents[i],
                         uv: uvs[i],
                     });
                 }
@@ -135,33 +136,8 @@ impl Mesh {
             }
         }
 
-        let (image_data, image_dimensions) = if let Some(first_image) = images.first() {
-            let width = first_image.width;
-            let height = first_image.height;
-            let image_dimensions = ImageDimensions::Dim2d {
-                width,
-                height,
-                array_layers: 1,
-            };
-
-            (first_image.pixels.clone(), image_dimensions)
-        } else {
-            // No texture available - create a default 1x1 white texture
-            let default_data = vec![255u8; 4]; // 1x1 RGBA white pixel
-            let default_dimensions = ImageDimensions::Dim2d {
-                width: 1,
-                height: 1,
-                array_layers: 1,
-            };
-            (default_data, default_dimensions)
-        };
-
         Mesh {
             build: Build { vertices, indices },
-            tex: Texture {
-                data: image_data,
-                dimensions: image_dimensions,
-            },
         }
     }
 }

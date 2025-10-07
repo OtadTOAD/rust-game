@@ -1,7 +1,6 @@
 mod engine;
 mod system;
 
-use system::DirectionalLight;
 use system::System;
 
 use vulkano::sync;
@@ -23,6 +22,16 @@ use crate::engine::Engine;
 const ENGINE_TICK_RATE: f32 = 60.0;
 
 fn main() {
+    // Just to make debug and release files work with debugger
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            if exe_dir.ends_with("debug") || exe_dir.ends_with("release") {
+                let project_root = exe_dir.parent().unwrap().parent().unwrap();
+                let _ = std::env::set_current_dir(project_root);
+            }
+        }
+    }
+
     let event_loop = EventLoop::new();
     let mut system = System::new(&event_loop);
 
@@ -58,7 +67,7 @@ fn main() {
         }
     });
 
-    let sun_light = DirectionalLight::new([100.0, -100.0, 100.0, 1.0], [1.0, 1.0, 1.0]);
+    //let sun_light = DirectionalLight::new([100.0, -100.0, 100.0, 1.0], [1.0, 1.0, 1.0]);
 
     let engine_for_render = engine.clone();
     event_loop.run(move |event, _, control_flow| match event {
@@ -103,14 +112,20 @@ fn main() {
             system.start();
 
             let draw_calls = e.get_draw_calls();
-            for (mesh_id, instances) in draw_calls {
-                let tex = Arc::clone(e.textures.get(&mesh_id).unwrap());
-                let mesh = Arc::clone(&e.meshes[mesh_id]);
-                system.geometry(instances, tex, mesh);
+            for ((mesh_id, material_id), instances) in draw_calls {
+                if let Some(mesh_data) = e.meshes.get(&mesh_id) {
+                    if let Some(material_data) = e.materials.get(&material_id) {
+                        let material = material_data.read().unwrap();
+                        let mesh = Arc::clone(&mesh_data);
+                        system.geometry(instances, material, mesh);
+                    }
+                }
             }
 
-            system.ambient();
-            system.directional(&sun_light);
+            system.start_lighting();
+            system.skybox(&e.skybox);
+            system.ambient(&e.skybox);
+            //system.directional(&sun_light);
             system.finish(&mut previous_frame_end);
         }
         _ => (),
