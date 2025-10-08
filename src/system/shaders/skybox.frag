@@ -3,6 +3,7 @@
 layout(location = 0) in vec2 frag_coord;
 
 layout(set = 0, binding = 0) uniform sampler2D hdr_sky;
+
 layout(set = 0, binding = 1) uniform Camera {
     mat4 inv_view;
     mat4 inv_proj;

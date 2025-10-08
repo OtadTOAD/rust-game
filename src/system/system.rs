@@ -675,6 +675,19 @@ impl System {
             }
         }
 
+        let camera_buffer = CpuAccessibleBuffer::from_data(
+            &self.memory_allocator,
+            BufferUsage {
+                uniform_buffer: true,
+                ..BufferUsage::empty()
+            },
+            false,
+            ambient_frag::ty::Camera_Data {
+                camera_pos: self.vp.camera_pos.into(),
+            },
+        )
+        .unwrap();
+
         let sampler = Sampler::new(
             self.device.clone(),
             SamplerCreateInfo {
@@ -693,12 +706,14 @@ impl System {
             [
                 WriteDescriptorSet::image_view(0, self.albedo_ao_buffer.clone()),
                 WriteDescriptorSet::image_view(1, self.surface_buffer.clone()),
+                WriteDescriptorSet::image_view(2, self.position_buffer.clone()),
                 WriteDescriptorSet::image_view_sampler(
-                    2,
+                    3,
                     skybox.image_view.clone().unwrap(),
                     sampler.clone(),
                 ),
-                WriteDescriptorSet::buffer(3, self.ambient_buffer.clone()),
+                WriteDescriptorSet::buffer(4, self.ambient_buffer.clone()),
+                WriteDescriptorSet::buffer(5, camera_buffer.clone()),
             ],
         )
         .unwrap();

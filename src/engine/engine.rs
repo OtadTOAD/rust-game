@@ -47,7 +47,7 @@ impl Engine {
 
             world: World::new(),
 
-            skybox: Skybox::new("assets/HDR/puresky.exr"),
+            skybox: Skybox::new("assets/HDR/forest.exr"),
             camera: Camera {
                 view: identity(),
                 camera_pos: vec3(0.0, 0.0, 0.0),
@@ -58,10 +58,11 @@ impl Engine {
     }
 
     pub fn init(&mut self) {
-        self.load_material(0, "material_cube");
+        self.load_material(0, "default");
+        self.load_material(1, "material_cube");
         self.load_mesh(0, "Material_Test");
 
-        let entity = self.spawn_instance(0, 0, vec3(0.0, -1.5, -3.0));
+        let entity = self.spawn_instance(0, 1, vec3(0.0, -1.5, -3.0));
         if let Ok(transform) = self.world.query_one_mut::<&mut Transform>(entity) {
             let rotation = rotate_normalized_axis(
                 &transform.rotation,
