@@ -1,11 +1,10 @@
-use crate::engine::{DrawInstance, DummyVertex, Engine, Material, Mesh, NormalVertex, Skybox};
-use crate::system::DirectionalLight;
+use crate::engine::VoxelWorld;
+use crate::system::dummy_vertex::DummyVertex;
 
-use vulkano::buffer::cpu_pool::CpuBufferPoolSubbuffer;
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, CpuBufferPool, TypedBufferAccess};
+use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
+    AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo, PrimaryAutoCommandBuffer,
     PrimaryCommandBufferAbstract, RenderPassBeginInfo, SubpassContents,
 };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
@@ -14,25 +13,22 @@ use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
-use vulkano::image::{AttachmentImage, ImageAccess, SwapchainImage};
+use vulkano::image::{AttachmentImage, ImageAccess, ImageDimensions, StorageImage, SwapchainImage};
 use vulkano::instance::debug::{
     DebugUtilsMessageSeverity, DebugUtilsMessageType, DebugUtilsMessenger,
     DebugUtilsMessengerCreateInfo,
 };
 use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::memory::allocator::StandardMemoryAllocator;
-use vulkano::pipeline::graphics::color_blend::{
-    AttachmentBlend, BlendFactor, BlendOp, ColorBlendState,
-};
 
-use vulkano::pipeline::graphics::depth_stencil::{CompareOp, DepthState, DepthStencilState};
+use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
-use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, StateMode};
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
-use vulkano::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode};
+use vulkano::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
 use vulkano::swapchain::{
     self, AcquireError, PresentMode, Surface, Swapchain, SwapchainAcquireFuture,
     SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo,
@@ -48,80 +44,21 @@ use winit::window::{Window, WindowBuilder};
 use nalgebra_glm::{TMat4, TVec3, half_pi, identity, inverse, perspective, vec3};
 
 use std::mem;
-use std::sync::{Arc, RwLockReadGuard};
+use std::sync::Arc;
 
 vulkano::impl_vertex!(DummyVertex, position);
-vulkano::impl_vertex!(NormalVertex, position, normal, tangent, uv);
-vulkano::impl_vertex!(DrawInstance, instance_model, instance_normal);
 
-mod deferred_vert {
+mod voxel_vert {
     vulkano_shaders::shader! {
         ty: "vertex",
-        path: "src/system/shaders/deferred.vert",
-        types_meta: {
-            use bytemuck::{Pod, Zeroable};
-
-            #[derive(Clone, Copy, Zeroable, Pod)]
-        },
+        path: "src/system/shaders/voxel.vert",
     }
 }
 
-mod deferred_frag {
+mod voxel_frag {
     vulkano_shaders::shader! {
         ty: "fragment",
-        path: "src/system/shaders/deferred.frag",
-    }
-}
-
-mod directional_vert {
-    vulkano_shaders::shader! {
-        ty: "vertex",
-        path: "src/system/shaders/directional.vert",
-    }
-}
-
-mod directional_frag {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "src/system/shaders/directional.frag",
-        types_meta: {
-            use bytemuck::{Pod, Zeroable};
-
-            #[derive(Clone, Copy, Zeroable, Pod)]
-        },
-    }
-}
-
-mod ambient_vert {
-    vulkano_shaders::shader! {
-        ty: "vertex",
-        path: "src/system/shaders/ambient.vert",
-    }
-}
-
-mod ambient_frag {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "src/system/shaders/ambient.frag",
-        types_meta: {
-            use bytemuck::{Pod, Zeroable};
-
-            #[derive(Clone, Copy, Zeroable, Pod)]
-        },
-    }
-}
-
-mod skybox_vert {
-    vulkano_shaders::shader! {
-        ty: "vertex",
-        path: "src/system/shaders/skybox.vert",
-    }
-}
-
-mod skybox_frag {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "src/system/shaders/skybox.frag",
+        path: "src/system/shaders/voxel.frag",
         types_meta: {
             use bytemuck::{Pod, Zeroable};
 
@@ -133,8 +70,7 @@ mod skybox_frag {
 #[derive(Debug, Clone)]
 enum RenderStage {
     Stopped,
-    Geometry,
-    Lighting,
+    Voxel,
     NeedsRedraw,
 }
 
@@ -148,24 +84,18 @@ pub struct System {
     descriptor_set_allocator: StandardDescriptorSetAllocator,
     command_buffer_allocator: StandardCommandBufferAllocator,
     render_pass: Arc<RenderPass>,
-    skybox_pipeline: Arc<GraphicsPipeline>,
-    deferred_pipeline: Arc<GraphicsPipeline>,
-    directional_pipeline: Arc<GraphicsPipeline>,
-    ambient_pipeline: Arc<GraphicsPipeline>,
-    vp_buffer: Arc<CpuAccessibleBuffer<deferred_vert::ty::VP_Data>>,
-    ambient_buffer: Arc<CpuAccessibleBuffer<ambient_frag::ty::Ambient_Data>>,
-    directional_buffer: CpuBufferPool<directional_frag::ty::Directional_Light_Data>,
+    voxel_pipeline: Arc<GraphicsPipeline>,
+    vp_buffer: Arc<CpuAccessibleBuffer<voxel_frag::ty::CameraUBO>>,
     dummy_verts: Arc<CpuAccessibleBuffer<[DummyVertex]>>,
     vp_set: Arc<PersistentDescriptorSet>,
     viewport: Viewport,
     framebuffers: Vec<Arc<Framebuffer>>,
-    albedo_ao_buffer: Arc<ImageView<AttachmentImage>>,
-    surface_buffer: Arc<ImageView<AttachmentImage>>,
-    position_buffer: Arc<ImageView<AttachmentImage>>,
     render_stage: RenderStage,
     commands: Option<AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>>,
     image_index: u32,
     acquire_future: Option<SwapchainAcquireFuture>,
+    voxel_image: Option<Arc<StorageImage>>,
+    voxel_image_view: Option<Arc<ImageView<StorageImage>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -185,8 +115,17 @@ impl VP {
     }
 }
 
-const AMBIENT_COLOR: [f32; 3] = [1.0, 1.0, 1.0];
-const AMBIENT_BRIGHTNESS: f32 = 1.0;
+fn get_camera_ubo(vp: &VP) -> voxel_frag::ty::CameraUBO {
+    let inv_proj = inverse(&vp.projection);
+    let inv_view = inverse(&vp.view);
+
+    voxel_frag::ty::CameraUBO {
+        inv_proj: inv_proj.into(),
+        inv_view: inv_view.into(),
+        cam_pos: vp.camera_pos.into(),
+        world_scale: 16.0,
+    }
+}
 
 impl System {
     pub fn new(event_loop: &EventLoop<()>) -> System {
@@ -343,14 +282,8 @@ impl System {
         let command_buffer_allocator =
             StandardCommandBufferAllocator::new(device.clone(), Default::default());
 
-        let deferred_vert = deferred_vert::load(device.clone()).unwrap();
-        let deferred_frag = deferred_frag::load(device.clone()).unwrap();
-        let directional_vert = directional_vert::load(device.clone()).unwrap();
-        let directional_frag = directional_frag::load(device.clone()).unwrap();
-        let ambient_vert = ambient_vert::load(device.clone()).unwrap();
-        let ambient_frag = ambient_frag::load(device.clone()).unwrap();
-        let skybox_vert = skybox_vert::load(device.clone()).unwrap();
-        let skybox_frag = skybox_frag::load(device.clone()).unwrap();
+        let deferred_vert = voxel_vert::load(device.clone()).unwrap();
+        let deferred_frag = voxel_frag::load(device.clone()).unwrap();
 
         let render_pass = vulkano::ordered_passes_renderpass!(device.clone(),
             attachments: {
@@ -358,24 +291,6 @@ impl System {
                     load: Clear,
                     store: Store,
                     format: swapchain.image_format(),
-                    samples: 1,
-                },
-                albedo_ao: {
-                    load: Clear,
-                    store: DontCare,
-                    format: Format::R8G8B8A8_SRGB,
-                    samples: 1,
-                },
-                surface: {
-                    load: Clear,
-                    store: DontCare,
-                    format: Format::R16G16B16A16_SFLOAT,
-                    samples: 1,
-                },
-                position: {
-                    load: Clear,
-                    store: DontCare,
-                    format: Format::R16G16B16A16_SFLOAT,
                     samples: 1,
                 },
                 depth: {
@@ -387,99 +302,25 @@ impl System {
             },
             passes: [
                 {
-                    color: [albedo_ao, surface, position],
-                    depth_stencil: {depth},
-                    input: []
-                },
-                {
                     color: [final_color],
                     depth_stencil: {depth},
-                    input: [albedo_ao, surface, position]
+                    input: []
                 }
             ]
         )
         .unwrap();
 
-        let deferred_pass = Subpass::from(render_pass.clone(), 0).unwrap();
-        let lighting_pass = Subpass::from(render_pass.clone(), 1).unwrap();
+        let voxel_pass = Subpass::from(render_pass.clone(), 0).unwrap();
 
-        let skybox_pipeline = GraphicsPipeline::start()
+        let voxel_pipeline = GraphicsPipeline::start()
             .vertex_input_state(BuffersDefinition::new().vertex::<DummyVertex>())
-            .vertex_shader(skybox_vert.entry_point("main").unwrap(), ())
-            .input_assembly_state(InputAssemblyState::new())
-            .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
-            .fragment_shader(skybox_frag.entry_point("main").unwrap(), ())
-            .depth_stencil_state(DepthStencilState {
-                depth: Some(DepthState {
-                    write_enable: StateMode::Fixed(false),
-                    compare_op: StateMode::Fixed(CompareOp::LessOrEqual),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            })
-            .render_pass(lighting_pass.clone())
-            .build(device.clone())
-            .unwrap();
-
-        let deferred_pipeline = GraphicsPipeline::start()
-            .vertex_input_state(
-                BuffersDefinition::new()
-                    .vertex::<NormalVertex>()
-                    .instance::<DrawInstance>(),
-            )
             .vertex_shader(deferred_vert.entry_point("main").unwrap(), ())
             .input_assembly_state(InputAssemblyState::new())
             .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
             .fragment_shader(deferred_frag.entry_point("main").unwrap(), ())
-            .depth_stencil_state(DepthStencilState::simple_depth_test())
-            .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
-            .render_pass(deferred_pass.clone())
-            .build(device.clone())
-            .unwrap();
-
-        let directional_pipeline = GraphicsPipeline::start()
-            .vertex_input_state(BuffersDefinition::new().vertex::<DummyVertex>())
-            .vertex_shader(directional_vert.entry_point("main").unwrap(), ())
-            .input_assembly_state(InputAssemblyState::new())
-            .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
-            .fragment_shader(directional_frag.entry_point("main").unwrap(), ())
-            .color_blend_state(
-                ColorBlendState::new(lighting_pass.num_color_attachments()).blend(
-                    AttachmentBlend {
-                        color_op: BlendOp::Add,
-                        color_source: BlendFactor::One,
-                        color_destination: BlendFactor::One,
-                        alpha_op: BlendOp::Max,
-                        alpha_source: BlendFactor::One,
-                        alpha_destination: BlendFactor::One,
-                    },
-                ),
-            )
-            .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
-            .render_pass(lighting_pass.clone())
-            .build(device.clone())
-            .unwrap();
-
-        let ambient_pipeline = GraphicsPipeline::start()
-            .vertex_input_state(BuffersDefinition::new().vertex::<DummyVertex>())
-            .vertex_shader(ambient_vert.entry_point("main").unwrap(), ())
-            .input_assembly_state(InputAssemblyState::new())
-            .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
-            .fragment_shader(ambient_frag.entry_point("main").unwrap(), ())
-            .color_blend_state(
-                ColorBlendState::new(lighting_pass.num_color_attachments()).blend(
-                    AttachmentBlend {
-                        color_op: BlendOp::Add,
-                        color_source: BlendFactor::One,
-                        color_destination: BlendFactor::One,
-                        alpha_op: BlendOp::Max,
-                        alpha_source: BlendFactor::One,
-                        alpha_destination: BlendFactor::One,
-                    },
-                ),
-            )
-            .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
-            .render_pass(lighting_pass.clone())
+            .depth_stencil_state(DepthStencilState::disabled())
+            .rasterization_state(RasterizationState::new().cull_mode(CullMode::None))
+            .render_pass(voxel_pass.clone())
             .build(device.clone())
             .unwrap();
 
@@ -490,29 +331,9 @@ impl System {
                 ..BufferUsage::empty()
             },
             false,
-            deferred_vert::ty::VP_Data {
-                view: vp.view.into(),
-                projection: vp.projection.into(),
-            },
+            get_camera_ubo(&vp),
         )
         .unwrap();
-
-        let ambient_buffer = CpuAccessibleBuffer::from_data(
-            &memory_allocator,
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            ambient_frag::ty::Ambient_Data {
-                color: AMBIENT_COLOR,
-                intensity: AMBIENT_BRIGHTNESS,
-            },
-        )
-        .unwrap();
-
-        let directional_buffer: CpuBufferPool<directional_frag::ty::Directional_Light_Data> =
-            CpuBufferPool::uniform_buffer(memory_allocator.clone());
 
         let dummy_verts = CpuAccessibleBuffer::from_iter(
             &memory_allocator,
@@ -525,11 +346,11 @@ impl System {
         )
         .unwrap();
 
-        let vp_layout = deferred_pipeline.layout().set_layouts().get(0).unwrap();
+        let vp_layout = voxel_pipeline.layout().set_layouts().get(0).unwrap();
         let vp_set = PersistentDescriptorSet::new(
             &descriptor_set_allocator,
             vp_layout.clone(),
-            [WriteDescriptorSet::buffer(0, vp_buffer.clone())],
+            [WriteDescriptorSet::buffer(1, vp_buffer.clone())],
         )
         .unwrap();
 
@@ -539,19 +360,20 @@ impl System {
             depth_range: 0.0..1.0,
         };
 
-        let (framebuffers, albedo_ao_buffer, surface_buffer, position_buffer) =
-            System::window_size_dependent_setup(
-                &memory_allocator,
-                &images,
-                render_pass.clone(),
-                &mut viewport,
-            );
+        let framebuffers = System::window_size_dependent_setup(
+            &memory_allocator,
+            &images,
+            render_pass.clone(),
+            &mut viewport,
+        );
 
         let render_stage = RenderStage::Stopped;
 
         let commands = None;
         let image_index = 0;
         let acquire_future = None;
+        let voxel_image = None;
+        let voxel_image_view = None;
 
         System {
             surface,
@@ -563,59 +385,131 @@ impl System {
             descriptor_set_allocator,
             command_buffer_allocator,
             render_pass,
-            skybox_pipeline,
-            deferred_pipeline,
-            directional_pipeline,
-            ambient_pipeline,
+            voxel_pipeline,
             vp_buffer,
-            ambient_buffer,
-            directional_buffer,
             dummy_verts,
             vp_set,
             viewport,
             framebuffers,
-            albedo_ao_buffer,
-            surface_buffer,
-            position_buffer,
             render_stage,
             commands,
             image_index,
             acquire_future,
+            voxel_image,
+            voxel_image_view,
         }
     }
 
-    pub fn skybox(&mut self, skybox: &Skybox) {
+    pub fn create_voxel_image(
+        &self,
+        voxel_world: &VoxelWorld,
+    ) -> (Arc<StorageImage>, Arc<ImageView<StorageImage>>) {
+        let image = StorageImage::new(
+            &self.memory_allocator,
+            ImageDimensions::Dim3d {
+                width: voxel_world.size[0],
+                height: voxel_world.size[1],
+                depth: voxel_world.size[2],
+            },
+            Format::R8_UNORM,
+            Some(self.queue.queue_family_index()),
+        )
+        .unwrap();
+
+        let image_view = ImageView::new_default(image.clone()).unwrap();
+        (image, image_view)
+    }
+
+    pub fn upload_voxel_data(&self, voxel_world: &VoxelWorld, voxel_image: &Arc<StorageImage>) {
+        let staging_buffer = voxel_world.create_staging_buffer(&self.memory_allocator);
+
+        let mut builder = AutoCommandBufferBuilder::primary(
+            &StandardCommandBufferAllocator::new(self.device.clone(), Default::default()),
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        builder
+            .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+                staging_buffer.clone(),
+                voxel_image.clone(),
+            ))
+            .unwrap();
+
+        let finished = builder
+            .build()
+            .unwrap()
+            .execute(self.queue.clone())
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap();
+
+        finished.wait(None).unwrap();
+    }
+
+    pub fn set_voxel_image(
+        &mut self,
+        image: Arc<StorageImage>,
+        image_view: Arc<ImageView<StorageImage>>,
+    ) {
+        self.voxel_image = Some(image);
+        self.voxel_image_view = Some(image_view);
+    }
+
+    pub fn update_voxel_image_dynamic(
+        &self,
+        voxel_world: &VoxelWorld,
+        staging_buffer: &Arc<CpuAccessibleBuffer<[u8]>>,
+        voxel_image: &Arc<StorageImage>,
+    ) {
+        voxel_world.update_staging_buffer(staging_buffer);
+
+        let mut builder = AutoCommandBufferBuilder::primary(
+            &StandardCommandBufferAllocator::new(self.device.clone(), Default::default()),
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        builder
+            .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+                staging_buffer.clone(),
+                voxel_image.clone(),
+            ))
+            .unwrap();
+
+        let command_buffer = builder.build().unwrap();
+
+        let finished = command_buffer
+            .execute(self.queue.clone())
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap();
+
+        finished.wait(None).unwrap();
+    }
+
+    pub fn voxel(&mut self) {
         match self.render_stage {
-            RenderStage::Lighting => {}
+            RenderStage::Voxel => {}
             RenderStage::NeedsRedraw => {
                 self.recreate_swapchain();
-                self.commands = None;
                 self.render_stage = RenderStage::Stopped;
+                self.commands = None;
                 return;
             }
             _ => {
-                self.commands = None;
                 self.render_stage = RenderStage::Stopped;
+                self.commands = None;
                 return;
             }
         }
 
-        let inv_view = self.vp.view.try_inverse().unwrap();
-        let inv_proj = self.vp.projection.try_inverse().unwrap();
-        let camera_buffer = CpuAccessibleBuffer::from_data(
-            &self.memory_allocator,
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            skybox_frag::ty::Camera {
-                inv_view: inv_view.into(),
-                inv_proj: inv_proj.into(),
-                camera_pos: self.vp.camera_pos.into(),
-            },
-        )
-        .unwrap();
+        let voxel_buffer = self
+            .voxel_image_view
+            .as_ref()
+            .expect("Voxel image not set!");
 
         let sampler = Sampler::new(
             self.device.clone(),
@@ -628,159 +522,13 @@ impl System {
         )
         .unwrap();
 
-        let skybox_layout = self.skybox_pipeline.layout().set_layouts().get(0).unwrap();
-        let skybox_set = PersistentDescriptorSet::new(
+        let voxel_layout = self.voxel_pipeline.layout().set_layouts().get(0).unwrap();
+        let voxel_set = PersistentDescriptorSet::new(
             &self.descriptor_set_allocator,
-            skybox_layout.clone(),
+            voxel_layout.clone(),
             [
-                WriteDescriptorSet::image_view_sampler(
-                    0,
-                    skybox.image_view.clone().unwrap(),
-                    sampler.clone(),
-                ),
-                WriteDescriptorSet::buffer(1, camera_buffer.clone()),
-            ],
-        )
-        .unwrap();
-
-        self.commands
-            .as_mut()
-            .unwrap()
-            .bind_pipeline_graphics(self.skybox_pipeline.clone())
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                self.skybox_pipeline.layout().clone(),
-                0,
-                skybox_set.clone(),
-            )
-            .set_viewport(0, [self.viewport.clone()])
-            .bind_vertex_buffers(0, self.dummy_verts.clone())
-            .draw(self.dummy_verts.len() as u32, 1, 0, 0)
-            .unwrap();
-    }
-
-    pub fn ambient(&mut self, skybox: &Skybox) {
-        match self.render_stage {
-            RenderStage::Lighting => {}
-            RenderStage::NeedsRedraw => {
-                self.recreate_swapchain();
-                self.commands = None;
-                self.render_stage = RenderStage::Stopped;
-                return;
-            }
-            _ => {
-                self.commands = None;
-                self.render_stage = RenderStage::Stopped;
-                return;
-            }
-        }
-
-        let camera_buffer = CpuAccessibleBuffer::from_data(
-            &self.memory_allocator,
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            ambient_frag::ty::Camera_Data {
-                camera_pos: self.vp.camera_pos.into(),
-            },
-        )
-        .unwrap();
-
-        let sampler = Sampler::new(
-            self.device.clone(),
-            SamplerCreateInfo {
-                mag_filter: Filter::Linear,
-                min_filter: Filter::Linear,
-                address_mode: [SamplerAddressMode::ClampToEdge; 3],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let ambient_layout = self.ambient_pipeline.layout().set_layouts().get(0).unwrap();
-        let ambient_set = PersistentDescriptorSet::new(
-            &self.descriptor_set_allocator,
-            ambient_layout.clone(),
-            [
-                WriteDescriptorSet::image_view(0, self.albedo_ao_buffer.clone()),
-                WriteDescriptorSet::image_view(1, self.surface_buffer.clone()),
-                WriteDescriptorSet::image_view(2, self.position_buffer.clone()),
-                WriteDescriptorSet::image_view_sampler(
-                    3,
-                    skybox.image_view.clone().unwrap(),
-                    sampler.clone(),
-                ),
-                WriteDescriptorSet::buffer(4, self.ambient_buffer.clone()),
-                WriteDescriptorSet::buffer(5, camera_buffer.clone()),
-            ],
-        )
-        .unwrap();
-
-        self.commands
-            .as_mut()
-            .unwrap()
-            .bind_pipeline_graphics(self.ambient_pipeline.clone())
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                self.ambient_pipeline.layout().clone(),
-                0,
-                ambient_set.clone(),
-            )
-            .set_viewport(0, [self.viewport.clone()])
-            .bind_vertex_buffers(0, self.dummy_verts.clone())
-            .draw(self.dummy_verts.len() as u32, 1, 0, 0)
-            .unwrap();
-    }
-
-    pub fn directional(&mut self, directional_light: &DirectionalLight) {
-        match self.render_stage {
-            RenderStage::Lighting => {}
-            RenderStage::NeedsRedraw => {
-                self.recreate_swapchain();
-                self.commands = None;
-                self.render_stage = RenderStage::Stopped;
-                return;
-            }
-            _ => {
-                self.commands = None;
-                self.render_stage = RenderStage::Stopped;
-                return;
-            }
-        }
-
-        let camera_buffer = CpuAccessibleBuffer::from_data(
-            &self.memory_allocator,
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            directional_frag::ty::Camera_Data {
-                position: self.vp.camera_pos.into(),
-            },
-        )
-        .unwrap();
-
-        let directional_subbuffer =
-            self.generate_directional_buffer(&self.directional_buffer, &directional_light);
-
-        let directional_layout = self
-            .directional_pipeline
-            .layout()
-            .set_layouts()
-            .get(0)
-            .unwrap();
-        let directional_set = PersistentDescriptorSet::new(
-            &self.descriptor_set_allocator,
-            directional_layout.clone(),
-            [
-                WriteDescriptorSet::image_view(0, self.albedo_ao_buffer.clone()),
-                WriteDescriptorSet::image_view(1, self.surface_buffer.clone()),
-                WriteDescriptorSet::image_view(2, self.position_buffer.clone()),
-                WriteDescriptorSet::buffer(4, directional_subbuffer.clone()),
-                WriteDescriptorSet::buffer(5, camera_buffer.clone()),
+                WriteDescriptorSet::image_view_sampler(0, voxel_buffer.clone(), sampler.clone()),
+                WriteDescriptorSet::buffer(1, self.vp_buffer.clone()),
             ],
         )
         .unwrap();
@@ -789,22 +537,21 @@ impl System {
             .as_mut()
             .unwrap()
             .set_viewport(0, [self.viewport.clone()])
-            .bind_pipeline_graphics(self.directional_pipeline.clone())
-            .bind_vertex_buffers(0, self.dummy_verts.clone())
+            .bind_pipeline_graphics(self.voxel_pipeline.clone()) // your voxel raymarch pipeline
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
-                self.directional_pipeline.layout().clone(),
+                self.voxel_pipeline.layout().clone(),
                 0,
-                directional_set.clone(),
+                voxel_set.clone(),
             )
+            .bind_vertex_buffers(0, self.dummy_verts.clone()) // fullscreen triangle
             .draw(self.dummy_verts.len() as u32, 1, 0, 0)
             .unwrap();
     }
 
     pub fn finish(&mut self, previous_frame_end: &mut Option<Box<dyn GpuFuture>>) {
         match self.render_stage {
-            RenderStage::Lighting => {}
-            RenderStage::Geometry => {}
+            RenderStage::Voxel => {}
             RenderStage::NeedsRedraw => {
                 self.recreate_swapchain();
                 self.commands = None;
@@ -862,179 +609,6 @@ impl System {
         self.render_stage = RenderStage::Stopped;
     }
 
-    fn generate_directional_buffer(
-        &self,
-        pool: &CpuBufferPool<directional_frag::ty::Directional_Light_Data>,
-        light: &DirectionalLight,
-    ) -> Arc<CpuBufferPoolSubbuffer<directional_frag::ty::Directional_Light_Data>> {
-        let uniform_data = directional_frag::ty::Directional_Light_Data {
-            position: light.position.into(),
-            color: light.color.into(),
-        };
-
-        pool.from_data(uniform_data).unwrap()
-    }
-
-    pub fn preload_textures(&mut self, engine: &mut Engine) {
-        let mut upload_builder = AutoCommandBufferBuilder::primary(
-            &self.command_buffer_allocator,
-            self.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
-
-        for (_, material_arc) in engine.materials.iter() {
-            let material = Arc::clone(material_arc);
-            let mut material_guard = material.write().unwrap();
-            material_guard.load(&self.memory_allocator, &mut upload_builder);
-        }
-
-        engine
-            .skybox
-            .load(&self.memory_allocator, &mut upload_builder);
-
-        upload_builder
-            .build()
-            .unwrap()
-            .execute(self.queue.clone())
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap()
-            .wait(None)
-            .unwrap();
-    }
-
-    pub fn geometry(
-        &mut self,
-        instances: Vec<DrawInstance>,
-        material: RwLockReadGuard<Material>,
-        mesh: Arc<Mesh>,
-    ) {
-        match self.render_stage {
-            RenderStage::Geometry => {}
-            RenderStage::NeedsRedraw => {
-                self.recreate_swapchain();
-                self.render_stage = RenderStage::Stopped;
-                self.commands = None;
-                return;
-            }
-            _ => {
-                self.render_stage = RenderStage::Stopped;
-                self.commands = None;
-                return;
-            }
-        }
-
-        let instance_len = instances.len();
-        let instance_buffer = CpuAccessibleBuffer::from_iter(
-            &self.memory_allocator,
-            BufferUsage {
-                vertex_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            instances.into_iter(),
-        )
-        .unwrap();
-
-        let sampler = Sampler::new(
-            self.device.clone(),
-            SamplerCreateInfo {
-                mag_filter: Filter::Linear,
-                min_filter: Filter::Linear,
-                mipmap_mode: SamplerMipmapMode::Nearest,
-                address_mode: [SamplerAddressMode::Repeat; 3],
-                mip_lod_bias: 0.0,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let model_layout = self
-            .deferred_pipeline
-            .layout()
-            .set_layouts()
-            .get(1)
-            .unwrap();
-        let (albedo_ao, surface) = material.unpack();
-        let model_set = PersistentDescriptorSet::new(
-            &self.descriptor_set_allocator,
-            model_layout.clone(),
-            [
-                WriteDescriptorSet::image_view_sampler(1, albedo_ao, sampler.clone()),
-                WriteDescriptorSet::image_view_sampler(2, surface, sampler.clone()),
-            ],
-        )
-        .unwrap();
-
-        let vertex_buffer = CpuAccessibleBuffer::from_iter(
-            &self.memory_allocator,
-            BufferUsage {
-                vertex_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            mesh.build.vertices.iter().cloned(),
-        )
-        .unwrap();
-        let index_buffer = CpuAccessibleBuffer::from_iter(
-            &self.memory_allocator,
-            BufferUsage {
-                index_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            mesh.build.indices.iter().cloned(),
-        )
-        .unwrap();
-
-        self.commands
-            .as_mut()
-            .unwrap()
-            .set_viewport(0, [self.viewport.clone()])
-            .bind_pipeline_graphics(self.deferred_pipeline.clone())
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                self.deferred_pipeline.layout().clone(),
-                0,
-                (self.vp_set.clone(), model_set.clone()),
-            )
-            .bind_vertex_buffers(0, (vertex_buffer.clone(), instance_buffer.clone()))
-            .bind_index_buffer(index_buffer.clone())
-            .draw_indexed(index_buffer.len() as u32, instance_len as u32, 0, 0, 0)
-            .unwrap();
-    }
-
-    pub fn start_lighting(&mut self) {
-        match self.render_stage {
-            RenderStage::Geometry => {
-                self.render_stage = RenderStage::Lighting;
-                self.commands
-                    .as_mut()
-                    .unwrap()
-                    .next_subpass(SubpassContents::Inline)
-                    .unwrap();
-            }
-            _ => {
-                return;
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn set_ambient(&mut self, color: [f32; 3], intensity: f32) {
-        self.ambient_buffer = CpuAccessibleBuffer::from_data(
-            &self.memory_allocator,
-            BufferUsage {
-                uniform_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            ambient_frag::ty::Ambient_Data { color, intensity },
-        )
-        .unwrap();
-    }
-
     pub fn set_view(&mut self, view: &TMat4<f32>) {
         self.vp.view = view.clone();
         let look = inverse(&view);
@@ -1046,23 +620,15 @@ impl System {
                 ..BufferUsage::empty()
             },
             false,
-            deferred_vert::ty::VP_Data {
-                view: self.vp.view.into(),
-                projection: self.vp.projection.into(),
-            },
+            get_camera_ubo(&self.vp),
         )
         .unwrap();
 
-        let vp_layout = self
-            .deferred_pipeline
-            .layout()
-            .set_layouts()
-            .get(0)
-            .unwrap();
+        let vp_layout = self.voxel_pipeline.layout().set_layouts().get(0).unwrap();
         self.vp_set = PersistentDescriptorSet::new(
             &self.descriptor_set_allocator,
             vp_layout.clone(),
-            [WriteDescriptorSet::buffer(0, self.vp_buffer.clone())],
+            [WriteDescriptorSet::buffer(1, self.vp_buffer.clone())],
         )
         .unwrap();
 
@@ -1072,7 +638,7 @@ impl System {
     pub fn start(&mut self) {
         match self.render_stage {
             RenderStage::Stopped => {
-                self.render_stage = RenderStage::Geometry;
+                self.render_stage = RenderStage::Voxel;
             }
             RenderStage::NeedsRedraw => {
                 self.recreate_swapchain();
@@ -1102,13 +668,7 @@ impl System {
             return;
         }
 
-        let clear_values = vec![
-            Some([0.0, 0.0, 0.0, 1.0].into()),
-            Some([0.0, 0.0, 0.0, 1.0].into()),
-            Some([0.0, 0.0, 0.0, 1.0].into()),
-            Some([0.0, 0.0, 0.0, 1.0].into()),
-            Some(1.0.into()),
-        ];
+        let clear_values = vec![Some([0.0, 0.0, 0.0, 1.0].into()), Some(1.0.into())];
 
         let mut commands = AutoCommandBufferBuilder::primary(
             &self.command_buffer_allocator,
@@ -1158,19 +718,15 @@ impl System {
             Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
         };
 
-        let (new_framebuffers, new_albedo_ao_buffer, new_surface_buffer, new_position_buffer) =
-            System::window_size_dependent_setup(
-                &self.memory_allocator,
-                &new_images,
-                self.render_pass.clone(),
-                &mut self.viewport,
-            );
+        let new_framebuffers = System::window_size_dependent_setup(
+            &self.memory_allocator,
+            &new_images,
+            self.render_pass.clone(),
+            &mut self.viewport,
+        );
 
         self.swapchain = new_swapchain;
         self.framebuffers = new_framebuffers;
-        self.albedo_ao_buffer = new_albedo_ao_buffer;
-        self.surface_buffer = new_surface_buffer;
-        self.position_buffer = new_position_buffer;
 
         self.vp_buffer = CpuAccessibleBuffer::from_data(
             &self.memory_allocator,
@@ -1179,23 +735,15 @@ impl System {
                 ..BufferUsage::empty()
             },
             false,
-            deferred_vert::ty::VP_Data {
-                view: self.vp.view.into(),
-                projection: self.vp.projection.into(),
-            },
+            get_camera_ubo(&self.vp),
         )
         .unwrap();
 
-        let vp_layout = self
-            .deferred_pipeline
-            .layout()
-            .set_layouts()
-            .get(0)
-            .unwrap();
+        let vp_layout = self.voxel_pipeline.layout().set_layouts().get(0).unwrap();
         self.vp_set = PersistentDescriptorSet::new(
             &self.descriptor_set_allocator,
             vp_layout.clone(),
-            [WriteDescriptorSet::buffer(0, self.vp_buffer.clone())],
+            [WriteDescriptorSet::buffer(1, self.vp_buffer.clone())],
         )
         .unwrap();
 
@@ -1207,47 +755,12 @@ impl System {
         images: &[Arc<SwapchainImage>],
         render_pass: Arc<RenderPass>,
         viewport: &mut Viewport,
-    ) -> (
-        Vec<Arc<Framebuffer>>,
-        Arc<ImageView<AttachmentImage>>,
-        Arc<ImageView<AttachmentImage>>,
-        Arc<ImageView<AttachmentImage>>,
-    ) {
+    ) -> Vec<Arc<Framebuffer>> {
         let dimensions = images[0].dimensions().width_height();
         viewport.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
 
         let depth_buffer = ImageView::new_default(
             AttachmentImage::transient(allocator, dimensions, Format::D16_UNORM).unwrap(),
-        )
-        .unwrap();
-
-        let albedo_ao_buffer = ImageView::new_default(
-            AttachmentImage::transient_input_attachment(
-                allocator,
-                dimensions,
-                Format::R8G8B8A8_SRGB,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        let surface_buffer = ImageView::new_default(
-            AttachmentImage::transient_input_attachment(
-                allocator,
-                dimensions,
-                Format::R16G16B16A16_SFLOAT,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        let position_buffer = ImageView::new_default(
-            AttachmentImage::transient_input_attachment(
-                allocator,
-                dimensions,
-                Format::R16G16B16A16_SFLOAT,
-            )
-            .unwrap(),
         )
         .unwrap();
 
@@ -1258,13 +771,7 @@ impl System {
                 Framebuffer::new(
                     render_pass.clone(),
                     FramebufferCreateInfo {
-                        attachments: vec![
-                            view,
-                            albedo_ao_buffer.clone(),
-                            surface_buffer.clone(),
-                            position_buffer.clone(),
-                            depth_buffer.clone(),
-                        ],
+                        attachments: vec![view, depth_buffer.clone()],
                         ..Default::default()
                     },
                 )
@@ -1272,11 +779,6 @@ impl System {
             })
             .collect::<Vec<_>>();
 
-        (
-            framebuffers,
-            albedo_ao_buffer.clone(),
-            surface_buffer.clone(),
-            position_buffer.clone(),
-        )
+        framebuffers
     }
 }

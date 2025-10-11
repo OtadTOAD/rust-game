@@ -11,8 +11,6 @@ use winit::event::KeyboardInput;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 
-use nalgebra_glm::{look_at, vec3};
-
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -38,17 +36,13 @@ fn main() {
     // Made this Arc/Mutex because both rendering loop and tick loop need access of this obj
     let engine = Arc::new(Mutex::new(Engine::new()));
 
-    system.set_view(&look_at(
-        &vec3(0.0, -1.5, 0.1),
-        &vec3(0.0, -1.5, 0.0),
-        &vec3(0.0, 1.0, 0.0),
-    ));
-
     {
         let mut e = engine.lock().unwrap();
         e.init();
 
-        system.preload_textures(&mut e);
+        let (voxel_storage_image, voxel_image_view) = system.create_voxel_image(&e.voxel);
+        system.upload_voxel_data(&e.voxel, &voxel_storage_image);
+        system.set_voxel_image(voxel_storage_image, voxel_image_view);
     }
 
     let mut previous_frame_end =
@@ -66,8 +60,6 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_secs_f32(timestep));
         }
     });
-
-    //let sun_light = DirectionalLight::new([100.0, -100.0, 100.0, 1.0], [1.0, 1.0, 1.0]);
 
     let engine_for_render = engine.clone();
     event_loop.run(move |event, _, control_flow| match event {
@@ -110,22 +102,7 @@ fn main() {
             }
 
             system.start();
-
-            let draw_calls = e.get_draw_calls();
-            for ((mesh_id, material_id), instances) in draw_calls {
-                if let Some(mesh_data) = e.meshes.get(&mesh_id) {
-                    if let Some(material_data) = e.materials.get(&material_id) {
-                        let material = material_data.read().unwrap();
-                        let mesh = Arc::clone(&mesh_data);
-                        system.geometry(instances, material, mesh);
-                    }
-                }
-            }
-
-            system.start_lighting();
-            system.skybox(&e.skybox);
-            system.ambient(&e.skybox);
-            //system.directional(&sun_light);
+            system.voxel();
             system.finish(&mut previous_frame_end);
         }
         _ => (),
