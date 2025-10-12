@@ -2,6 +2,7 @@ mod camera;
 mod ecs;
 mod engine;
 mod input_manager;
+mod voxel_chunk;
 mod voxel_world;
 
 pub use engine::Engine;

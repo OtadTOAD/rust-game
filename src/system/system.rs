@@ -5,7 +5,7 @@ use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo, PrimaryAutoCommandBuffer,
-    PrimaryCommandBufferAbstract, RenderPassBeginInfo, SubpassContents,
+    RenderPassBeginInfo, SubpassContents,
 };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
@@ -13,7 +13,7 @@ use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
-use vulkano::image::{AttachmentImage, ImageAccess, ImageDimensions, StorageImage, SwapchainImage};
+use vulkano::image::{AttachmentImage, ImageAccess, StorageImage, SwapchainImage};
 use vulkano::instance::debug::{
     DebugUtilsMessageSeverity, DebugUtilsMessageType, DebugUtilsMessenger,
     DebugUtilsMessengerCreateInfo,
@@ -41,7 +41,7 @@ use vulkano_win::VkSurfaceBuild;
 use winit::event_loop::EventLoop;
 use winit::window::{Window, WindowBuilder};
 
-use nalgebra_glm::{TMat4, TVec3, half_pi, identity, inverse, perspective, vec3};
+use nalgebra_glm::{TMat4, TVec3, Vec2, half_pi, identity, inverse, perspective, vec2, vec3};
 
 use std::mem;
 use std::sync::Arc;
@@ -94,6 +94,7 @@ pub struct System {
     commands: Option<AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>>,
     image_index: u32,
     acquire_future: Option<SwapchainAcquireFuture>,
+
     voxel_image: Option<Arc<StorageImage>>,
     voxel_image_view: Option<Arc<ImageView<StorageImage>>>,
 }
@@ -103,6 +104,7 @@ struct VP {
     view: TMat4<f32>,
     projection: TMat4<f32>,
     camera_pos: TVec3<f32>,
+    resolution: Vec2,
 }
 
 impl VP {
@@ -111,6 +113,7 @@ impl VP {
             view: identity(),
             projection: identity(),
             camera_pos: vec3(0.0, 0.0, 0.0),
+            resolution: vec2(600.0, 800.0),
         }
     }
 }
@@ -122,8 +125,8 @@ fn get_camera_ubo(vp: &VP) -> voxel_frag::ty::CameraUBO {
     voxel_frag::ty::CameraUBO {
         inv_proj: inv_proj.into(),
         inv_view: inv_view.into(),
-        cam_pos: vp.camera_pos.into(),
-        world_scale: 16.0,
+        cam_pos_and_scale: [vp.camera_pos.x, vp.camera_pos.y, vp.camera_pos.z, 80.0],
+        resolution: vp.resolution.into(),
     }
 }
 
@@ -400,18 +403,21 @@ impl System {
         }
     }
 
+    /*
     pub fn create_voxel_image(
         &self,
         voxel_world: &VoxelWorld,
     ) -> (Arc<StorageImage>, Arc<ImageView<StorageImage>>) {
+        let (_min_pos, _max_pos, world_size) = voxel_world.get_world_bounds();
+
         let image = StorageImage::new(
             &self.memory_allocator,
             ImageDimensions::Dim3d {
-                width: voxel_world.size[0],
-                height: voxel_world.size[1],
-                depth: voxel_world.size[2],
+                width: world_size[0],
+                height: world_size[1],
+                depth: world_size[2],
             },
-            Format::R8_UNORM,
+            Format::R8_UINT,
             Some(self.queue.queue_family_index()),
         )
         .unwrap();
@@ -463,8 +469,6 @@ impl System {
         staging_buffer: &Arc<CpuAccessibleBuffer<[u8]>>,
         voxel_image: &Arc<StorageImage>,
     ) {
-        voxel_world.update_staging_buffer(staging_buffer);
-
         let mut builder = AutoCommandBufferBuilder::primary(
             &StandardCommandBufferAllocator::new(self.device.clone(), Default::default()),
             self.queue.queue_family_index(),
@@ -488,6 +492,61 @@ impl System {
             .unwrap();
 
         finished.wait(None).unwrap();
+    }*/
+
+    pub fn create_voxel_image(&mut self, size: [u32; 3]) {
+        use vulkano::format::Format;
+        use vulkano::image::ImageDimensions;
+
+        let image = StorageImage::new(
+            &self.memory_allocator,
+            ImageDimensions::Dim3d {
+                width: size[0].max(1),
+                height: size[1].max(1),
+                depth: size[2].max(1),
+            },
+            Format::R8_UINT,
+            Some(self.queue.queue_family_index()),
+        )
+        .unwrap();
+
+        let image_view = ImageView::new_default(image.clone()).unwrap();
+        self.voxel_image = Some(image);
+        self.voxel_image_view = Some(image_view);
+    }
+
+    pub fn update_voxel_image(&mut self, voxel_world: &mut VoxelWorld) {
+        if !voxel_world.needs_gpu_update {
+            return;
+        }
+
+        if let Some(image) = &self.voxel_image {
+            let staging_buffer = voxel_world.create_staging_buffer(&self.memory_allocator);
+
+            let mut builder = AutoCommandBufferBuilder::primary(
+                &self.command_buffer_allocator,
+                self.queue.queue_family_index(),
+                CommandBufferUsage::OneTimeSubmit,
+            )
+            .unwrap();
+
+            builder
+                .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+                    staging_buffer,
+                    image.clone(),
+                ))
+                .unwrap();
+
+            let command_buffer = builder.build().unwrap();
+            let future = vulkano::sync::now(self.queue.device().clone())
+                .then_execute(self.queue.clone(), command_buffer)
+                .unwrap()
+                .then_signal_fence_and_flush()
+                .unwrap();
+            future.wait(None).unwrap();
+
+            voxel_world.needs_gpu_update = false;
+        }
     }
 
     pub fn voxel(&mut self) {
@@ -514,8 +573,8 @@ impl System {
         let sampler = Sampler::new(
             self.device.clone(),
             SamplerCreateInfo {
-                mag_filter: Filter::Linear,
-                min_filter: Filter::Linear,
+                mag_filter: Filter::Nearest,
+                min_filter: Filter::Nearest,
                 address_mode: [SamplerAddressMode::ClampToEdge; 3],
                 ..Default::default()
             },
@@ -708,6 +767,7 @@ impl System {
 
         let aspect_ratio = image_extent[0] as f32 / image_extent[1] as f32;
         self.vp.projection = perspective(aspect_ratio, half_pi(), 0.01, 300.0);
+        self.vp.resolution = vec2(image_extent[0] as f32, image_extent[1] as f32);
 
         let (new_swapchain, new_images) = match self.swapchain.recreate(SwapchainCreateInfo {
             image_extent,

@@ -40,9 +40,9 @@ fn main() {
         let mut e = engine.lock().unwrap();
         e.init();
 
-        let (voxel_storage_image, voxel_image_view) = system.create_voxel_image(&e.voxel);
-        system.upload_voxel_data(&e.voxel, &voxel_storage_image);
-        system.set_voxel_image(voxel_storage_image, voxel_image_view);
+        let (_min_pos, _max_pos, world_size) = e.voxel.get_world_bounds();
+        system.create_voxel_image(world_size);
+        system.update_voxel_image(&mut e.voxel);
     }
 
     let mut previous_frame_end =
@@ -100,6 +100,8 @@ fn main() {
                 e.camera.requires_update = false;
                 system.set_view(&e.camera.view);
             }
+
+            system.update_voxel_image(&mut e.voxel);
 
             system.start();
             system.voxel();
