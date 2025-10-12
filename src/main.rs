@@ -39,6 +39,10 @@ fn main() {
     {
         let mut e = engine.lock().unwrap();
         e.init();
+
+        let (_min_pos, _max_pos, world_size) = e.voxel.get_world_bounds();
+        system.create_voxel_image(world_size);
+        system.update_voxel_image(&mut e.voxel);
     }
 
     let mut previous_frame_end =

@@ -521,23 +521,8 @@ impl System {
             return;
         }
 
-        for chunk in voxel_world.chunks.values_mut() {
-            if chunk.gpu_image.is_none() {
-                chunk.create_gpu_image(&self.memory_allocator, &self.queue);
-            }
-            chunk.upload_to_gpu(
-                &self.memory_allocator,
-                self.queue.clone(),
-                &self.command_buffer_allocator,
-            );
-        }
-
-        /*
         if let Some(image) = &self.voxel_image {
-            let (_min_pos, _max_pos, world_size) = voxel_world.get_world_bounds();
-
-            let (staging_buffer, regions) =
-                voxel_world.create_staging_buffer_for_unsynced(&self.memory_allocator);
+            let staging_buffer = voxel_world.create_staging_buffer(&self.memory_allocator);
 
             let mut builder = AutoCommandBufferBuilder::primary(
                 &self.command_buffer_allocator,
@@ -546,9 +531,12 @@ impl System {
             )
             .unwrap();
 
-            let mut copy_info = CopyBufferToImageInfo::buffer_image(staging_buffer, image.clone());
-            copy_info.regions = regions.into();
-            builder.copy_buffer_to_image(copy_info).unwrap();
+            builder
+                .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+                    staging_buffer,
+                    image.clone(),
+                ))
+                .unwrap();
 
             let command_buffer = builder.build().unwrap();
             let future = vulkano::sync::now(self.queue.device().clone())
@@ -558,11 +546,8 @@ impl System {
                 .unwrap();
             future.wait(None).unwrap();
 
-            for chunk in voxel_world.chunks.values_mut() {
-                chunk.synced = true;
-            }
             voxel_world.needs_gpu_update = false;
-        }*/
+        }
     }
 
     pub fn voxel(&mut self) {
