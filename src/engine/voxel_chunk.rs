@@ -1,4 +1,18 @@
+use std::sync::Arc;
+
 use nalgebra_glm::{TVec3, vec3};
+use vulkano::{
+    buffer::{BufferUsage, CpuAccessibleBuffer},
+    command_buffer::{
+        AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo,
+        allocator::StandardCommandBufferAllocator,
+    },
+    device::Queue,
+    format::Format,
+    image::{ImageDimensions, StorageImage, view::ImageView},
+    memory::allocator::StandardMemoryAllocator,
+    sync::GpuFuture,
+};
 
 pub const CHUNK_SIZE: u8 = 16;
 
@@ -8,20 +22,106 @@ pub type VoxelID = u8;
 pub struct VoxelChunk {
     pub position: ChunkPosition,
     pub voxels: Vec<VoxelID>,
-    pub modified: bool,
+    pub synced: bool,
+
+    pub gpu_image: Option<Arc<StorageImage>>,
+    pub gpu_image_view: Option<Arc<ImageView<StorageImage>>>,
 }
 
 impl VoxelChunk {
     pub fn new(position: ChunkPosition) -> Self {
         let total_voxels = CHUNK_SIZE as usize * CHUNK_SIZE as usize * CHUNK_SIZE as usize;
         let voxels = vec![0u8; total_voxels];
-        let modified = false;
+        let synced = false;
+
+        let gpu_image = None;
+        let gpu_image_view = None;
 
         Self {
-            modified,
             position,
             voxels,
+            synced,
+
+            gpu_image_view,
+            gpu_image,
         }
+    }
+
+    pub fn create_gpu_image(
+        &mut self,
+        allocator: &Arc<StandardMemoryAllocator>,
+        queue: &Arc<Queue>,
+    ) {
+        if self.gpu_image.is_some() {
+            return;
+        }
+
+        let image = StorageImage::new(
+            allocator,
+            ImageDimensions::Dim3d {
+                width: CHUNK_SIZE as u32,
+                height: CHUNK_SIZE as u32,
+                depth: CHUNK_SIZE as u32,
+            },
+            Format::R8_UINT,
+            Some(queue.queue_family_index()),
+        )
+        .unwrap();
+
+        let view = ImageView::new_default(image.clone()).unwrap();
+
+        self.gpu_image = Some(image);
+        self.gpu_image_view = Some(view);
+    }
+
+    pub fn upload_to_gpu(
+        &mut self,
+        allocator: &Arc<StandardMemoryAllocator>,
+        queue: Arc<Queue>,
+        command: &StandardCommandBufferAllocator,
+    ) {
+        if self.synced {
+            return;
+        }
+
+        self.create_gpu_image(allocator, &queue);
+
+        let staging_buffer = CpuAccessibleBuffer::from_iter(
+            &allocator.clone(),
+            BufferUsage {
+                transfer_src: true,
+                ..Default::default()
+            },
+            false,
+            self.voxels.iter().cloned(),
+        )
+        .unwrap();
+
+        let image = self.gpu_image.as_ref().unwrap().clone();
+
+        let mut builder = AutoCommandBufferBuilder::primary(
+            command,
+            queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        builder
+            .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+                staging_buffer,
+                image.clone(),
+            ))
+            .unwrap();
+
+        let command_buffer = builder.build().unwrap();
+        let future = vulkano::sync::now(queue.device().clone())
+            .then_execute(queue.clone(), command_buffer)
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap();
+        future.wait(None).unwrap();
+
+        self.synced = true;
     }
 
     pub fn load(&mut self) {
@@ -70,6 +170,6 @@ impl VoxelChunk {
     pub fn set(&mut self, x: u8, y: u8, z: u8, val: VoxelID) {
         let idx = Self::get_idx(x, y, z);
         self.voxels[idx] = val;
-        self.modified = true;
+        self.synced = false;
     }
 }

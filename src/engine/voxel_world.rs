@@ -2,6 +2,8 @@ use nalgebra_glm::{Vec3, vec3};
 use std::{collections::HashMap, sync::Arc};
 use vulkano::{
     buffer::{BufferUsage, CpuAccessibleBuffer},
+    command_buffer::BufferImageCopy,
+    image::{ImageAspects, ImageSubresourceLayers},
     memory::allocator::StandardMemoryAllocator,
 };
 
@@ -113,46 +115,58 @@ impl VoxelWorld {
         )
     }
 
-    pub fn create_staging_buffer(
+    fn chunk_offset(pos: &ChunkPosition) -> [u32; 3] {
+        [
+            (pos.x * CHUNK_SIZE as i32) as u32,
+            (pos.y * CHUNK_SIZE as i32) as u32,
+            (pos.z * CHUNK_SIZE as i32) as u32,
+        ]
+    }
+
+    pub fn create_staging_buffer_for_unsynced(
         &self,
         allocator: &Arc<StandardMemoryAllocator>,
-    ) -> Arc<CpuAccessibleBuffer<[u8]>> {
-        let (min_pos, _max_pos, world_size) = self.get_world_bounds();
-
-        let world_size_x = world_size[0] as usize;
-        let world_size_y = world_size[1] as usize;
-        let world_size_z = world_size[2] as usize;
-
-        let total_voxels = world_size_x * world_size_y * world_size_z;
-        let mut voxels = vec![0u8; total_voxels];
-
-        let offset_x = -min_pos.x;
-        let offset_y = -min_pos.y;
-        let offset_z = -min_pos.z;
+    ) -> (Arc<CpuAccessibleBuffer<[u8]>>, Vec<BufferImageCopy>) {
+        let mut voxels = Vec::new();
+        let mut regions = Vec::new();
+        let mut buffer_offset: u64 = 0;
 
         for (pos, chunk) in &self.chunks {
-            let chunk_offset_x = (pos.x + offset_x) as usize * CHUNK_SIZE as usize;
-            let chunk_offset_y = (pos.y + offset_y) as usize * CHUNK_SIZE as usize;
-            let chunk_offset_z = (pos.z + offset_z) as usize * CHUNK_SIZE as usize;
-
-            for z in 0..CHUNK_SIZE {
-                for y in 0..CHUNK_SIZE {
-                    for x in 0..CHUNK_SIZE {
-                        let world_x = chunk_offset_x + x as usize;
-                        let world_y = chunk_offset_y + y as usize;
-                        let world_z = chunk_offset_z + z as usize;
-
-                        let world_idx = world_x
-                            + world_y * world_size_x
-                            + world_z * world_size_x * world_size_y;
-
-                        voxels[world_idx] = chunk.get(x, y, z);
+            if !chunk.synced {
+                for z in 0..CHUNK_SIZE {
+                    for y in 0..CHUNK_SIZE {
+                        for x in 0..CHUNK_SIZE {
+                            voxels.push(chunk.get(x, y, z));
+                        }
                     }
                 }
+
+                let offset = Self::chunk_offset(pos);
+                let chunk_size: u32 = CHUNK_SIZE.into();
+
+                regions.push(BufferImageCopy {
+                    buffer_offset,
+                    buffer_row_length: chunk_size,
+                    buffer_image_height: chunk_size,
+                    image_subresource: ImageSubresourceLayers {
+                        aspects: ImageAspects {
+                            color: true,
+                            ..Default::default()
+                        },
+                        mip_level: 0,
+                        array_layers: 0..1,
+                    },
+                    image_offset: offset.into(),
+                    image_extent: [chunk_size, chunk_size, chunk_size],
+                    ..Default::default()
+                });
+
+                let chunk_voxel_count = (CHUNK_SIZE as u64).pow(3);
+                buffer_offset += chunk_voxel_count;
             }
         }
 
-        CpuAccessibleBuffer::from_iter(
+        let staging_buffer = CpuAccessibleBuffer::from_iter(
             allocator,
             BufferUsage {
                 transfer_src: true,
@@ -161,6 +175,8 @@ impl VoxelWorld {
             false,
             voxels.iter().cloned(),
         )
-        .unwrap()
+        .unwrap();
+
+        (staging_buffer, regions)
     }
 }
