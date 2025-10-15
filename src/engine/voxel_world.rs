@@ -2,8 +2,6 @@ use nalgebra_glm::{Vec3, vec3};
 use std::{collections::HashMap, sync::Arc};
 use vulkano::{
     buffer::{BufferUsage, CpuAccessibleBuffer},
-    command_buffer::BufferImageCopy,
-    image::{ImageAspects, ImageSubresourceLayers},
     memory::allocator::StandardMemoryAllocator,
 };
 

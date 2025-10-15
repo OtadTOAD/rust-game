@@ -2,6 +2,9 @@ mod camera;
 mod ecs;
 mod engine;
 mod input_manager;
+mod octree;
+mod octree_builder;
+mod octree_gpu;
 mod voxel_chunk;
 mod voxel_world;
 

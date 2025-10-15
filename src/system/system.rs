@@ -1,7 +1,6 @@
 use crate::engine::VoxelWorld;
 use crate::system::dummy_vertex::DummyVertex;
 
-use png::chunk;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
