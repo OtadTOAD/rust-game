@@ -1,17 +1,23 @@
 use nalgebra_glm::{Vec3, vec3};
-use std::{collections::HashMap, sync::Arc};
-use vulkano::{
-    buffer::{BufferUsage, CpuAccessibleBuffer},
-    memory::allocator::StandardMemoryAllocator,
-};
+use std::collections::{HashMap, VecDeque};
 
-use crate::engine::voxel_chunk::{CHUNK_SIZE, ChunkPosition, VoxelChunk};
+use crate::engine::voxel_chunk::{CHUNK_SIZE, ChunkPosition, ChunkUpdateType, VoxelChunk};
+
+#[derive(Clone, Debug)]
+pub struct ChunkUpdate {
+    pub position: ChunkPosition,
+    pub update_type: ChunkUpdateType,
+    pub priority: u32,
+}
 
 pub struct VoxelWorld {
     pub chunks: HashMap<ChunkPosition, VoxelChunk>,
     pub render_dist: i16,
     last_center_chunk: Option<ChunkPosition>,
-    pub needs_gpu_update: bool,
+
+    pub update_queue: VecDeque<ChunkUpdate>,
+    pub pending_removals: Vec<ChunkPosition>,
+    current_frame: u64,
 }
 
 impl VoxelWorld {
@@ -20,11 +26,15 @@ impl VoxelWorld {
             chunks: HashMap::new(),
             render_dist,
             last_center_chunk: None,
-            needs_gpu_update: false,
+            update_queue: VecDeque::new(),
+            pending_removals: Vec::new(),
+            current_frame: 0,
         }
     }
 
     pub fn load_chunks(&mut self, pos: Vec3) -> bool {
+        self.current_frame += 1;
+
         let main_chunk: ChunkPosition = vec3(
             (pos.x / CHUNK_SIZE as f32).floor() as i32,
             (pos.y / CHUNK_SIZE as f32).floor() as i32,
@@ -56,7 +66,17 @@ impl VoxelWorld {
                     if !self.chunks.contains_key(&chunk_pos) {
                         let mut new_chunk = VoxelChunk::new(chunk_pos);
                         new_chunk.load();
+
+                        let dist_sq = (dx * dx + dy * dy + dz * dz) as u32;
+                        let priority = 1000 - dist_sq.min(999);
+
                         self.chunks.insert(chunk_pos, new_chunk);
+                        self.update_queue.push_back(ChunkUpdate {
+                            position: chunk_pos,
+                            update_type: ChunkUpdateType::Added,
+                            priority,
+                        });
+
                         any_changes = true;
                     }
                 }
@@ -78,15 +98,62 @@ impl VoxelWorld {
             .collect();
 
         for pos in chunks_to_remove {
+            self.pending_removals.push(pos);
             self.chunks.remove(&pos);
             any_changes = true;
         }
 
         if any_changes {
-            self.needs_gpu_update = true;
+            self.sort_update_queue();
         }
 
         any_changes
+    }
+
+    fn sort_update_queue(&mut self) {
+        let mut items: Vec<_> = self.update_queue.drain(..).collect();
+        items.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.update_queue = items.into();
+    }
+
+    pub fn get_pending_updates(
+        &mut self,
+        max_count: usize,
+    ) -> (Vec<ChunkUpdate>, Vec<ChunkPosition>) {
+        let mut updates = Vec::new();
+
+        for _ in 0..max_count {
+            if let Some(update) = self.update_queue.pop_front() {
+                if let Some(chunk) = self.chunks.get_mut(&update.position) {
+                    if chunk.needs_update() {
+                        updates.push(update);
+                        chunk.mark_update_processed();
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        let removals = std::mem::take(&mut self.pending_removals);
+
+        (updates, removals)
+    }
+
+    pub fn get_chunk_voxels(&self, pos: &ChunkPosition) -> Option<[u8; 4096]> {
+        self.chunks.get(pos).map(|chunk| {
+            let mut data = [0u8; 4096];
+            data.copy_from_slice(&chunk.voxels[..4096]);
+            data
+        })
+    }
+
+    pub fn has_pending_updates(&self) -> bool {
+        !self.update_queue.is_empty() || !self.pending_removals.is_empty()
+    }
+
+    pub fn pending_update_count(&self) -> usize {
+        self.update_queue.len() + self.pending_removals.len()
     }
 
     pub fn get_world_bounds(&self) -> (ChunkPosition, ChunkPosition, [u32; 3]) {
@@ -111,56 +178,5 @@ impl VoxelWorld {
             vec3(max_x, max_y, max_z),
             [world_size_x, world_size_y, world_size_z],
         )
-    }
-
-    pub fn create_staging_buffer(
-        &self,
-        allocator: &Arc<StandardMemoryAllocator>,
-    ) -> Arc<CpuAccessibleBuffer<[u8]>> {
-        let (min_pos, _max_pos, world_size) = self.get_world_bounds();
-
-        let world_size_x = world_size[0] as usize;
-        let world_size_y = world_size[1] as usize;
-        let world_size_z = world_size[2] as usize;
-
-        let total_voxels = world_size_x * world_size_y * world_size_z;
-        let mut voxels = vec![0u8; total_voxels];
-
-        let offset_x = -min_pos.x;
-        let offset_y = -min_pos.y;
-        let offset_z = -min_pos.z;
-
-        for (pos, chunk) in &self.chunks {
-            let chunk_offset_x = (pos.x + offset_x) as usize * CHUNK_SIZE as usize;
-            let chunk_offset_y = (pos.y + offset_y) as usize * CHUNK_SIZE as usize;
-            let chunk_offset_z = (pos.z + offset_z) as usize * CHUNK_SIZE as usize;
-
-            for z in 0..CHUNK_SIZE {
-                for y in 0..CHUNK_SIZE {
-                    for x in 0..CHUNK_SIZE {
-                        let world_x = chunk_offset_x + x as usize;
-                        let world_y = chunk_offset_y + y as usize;
-                        let world_z = chunk_offset_z + z as usize;
-
-                        let world_idx = world_x
-                            + world_y * world_size_x
-                            + world_z * world_size_x * world_size_y;
-
-                        voxels[world_idx] = chunk.get(x, y, z);
-                    }
-                }
-            }
-        }
-
-        CpuAccessibleBuffer::from_iter(
-            allocator,
-            BufferUsage {
-                transfer_src: true,
-                ..Default::default()
-            },
-            false,
-            voxels.iter().cloned(),
-        )
-        .unwrap()
     }
 }

@@ -1,11 +1,29 @@
 #version 450
 
-layout(set = 0, binding = 0) uniform usampler3D u_voxel_data;
+// Octree node structure (must match GpuOctreeNode - 8 bytes)
+struct OctreeNode {
+    uint child_ptr;  // 0 = leaf, otherwise index to first child
+    uint data;       // voxel ID for leaves (packed in low 8 bits)
+};
 
-layout(set = 0, binding = 1) uniform CameraUBO {
+// Octree buffers
+layout(set = 0, binding = 0) readonly buffer OctreeNodes {
+    OctreeNode nodes[];
+} octree_nodes;
+
+layout(set = 0, binding = 1) uniform OctreeMetadata {
+    uint octree_size;
+    uint node_count;
+    uint max_depth;
+    int world_offset_x;
+    int world_offset_y;
+    int world_offset_z;
+} octree_meta;
+
+layout(set = 0, binding = 2) uniform CameraUBO {
     mat4 inv_proj;
     mat4 inv_view;
-    vec4 cam_pos_and_scale; // xyz = cam_pos, w = world_scale
+    vec4 cam_pos_and_scale;
     vec2 resolution;
 } camera;
 
@@ -19,7 +37,8 @@ vec3 ray_direction(vec2 uv) {
     return normalize(world_dir);
 }
 
-bool intersect_box(vec3 ray_origin, vec3 ray_dir, vec3 box_min, vec3 box_max, out float t_near, out float t_far) {
+bool intersect_box(vec3 ray_origin, vec3 ray_dir, vec3 box_min, vec3 box_max, 
+                   out float t_near, out float t_far) {
     vec3 inv_dir = 1.0 / ray_dir;
     vec3 t_min = (box_min - ray_origin) * inv_dir;
     vec3 t_max = (box_max - ray_origin) * inv_dir;
@@ -30,23 +49,13 @@ bool intersect_box(vec3 ray_origin, vec3 ray_dir, vec3 box_min, vec3 box_max, ou
     t_near = max(max(t1.x, t1.y), t1.z);
     t_far = min(min(t2.x, t2.y), t2.z);
     
-    // If camera is inside the box, start from 0 (camera position)
     if (t_near < 0.0) {
         t_near = 0.0;
     }
     
-    return t_far > t_near;
+    return t_far > t_near && t_far > 0.0;
 }
 
-// Get voxel value at integer voxel coordinates
-uint get_voxel_at(ivec3 voxel_coord, ivec3 grid_size) {
-    if (any(lessThan(voxel_coord, ivec3(0))) || any(greaterThanEqual(voxel_coord, grid_size))) {
-        return 0u;
-    }
-    return texelFetch(u_voxel_data, voxel_coord, 0).r;
-}
-
-// Get base color for voxel type
 vec3 get_voxel_color(uint voxel_id) {
     if (voxel_id == 1u) {
         return vec3(0.85, 0.35, 0.25);
@@ -58,112 +67,160 @@ vec3 get_voxel_color(uint voxel_id) {
     return vec3(1.0, 0.0, 1.0);
 }
 
-// Improved DDA Voxel Traversal
-bool dda_raymarch(vec3 ray_origin, vec3 ray_dir, vec3 box_min, vec3 box_max, 
-                  float t_near, float t_far, out vec3 hit_normal, out uint hit_voxel, out float hit_t) {
+// Stack entry for octree traversal
+struct StackEntry {
+    uint node_idx;
+    vec3 box_min;
+    vec3 box_max;
+    float t_enter;
+};
+
+// FIXED: Improved octree traversal with proper front-to-back ordering
+bool traverse_octree(vec3 ray_origin, vec3 ray_dir, vec3 world_min, vec3 world_max,
+                     float t_near, float t_far, out vec3 hit_normal, 
+                     out uint hit_voxel, out float hit_t) {
     
-    ivec3 grid_size = textureSize(u_voxel_data, 0);
+    const int MAX_STACK = 23;
+    StackEntry stack[MAX_STACK];
+    int stack_ptr = 0;
     
-    // Start position - handle camera inside volume
-    float start_t = max(t_near, 0.0);
-    vec3 start_pos = ray_origin + ray_dir * start_t;
+    // Start at root
+    stack[0].node_idx = 0u;
+    stack[0].box_min = world_min;
+    stack[0].box_max = world_max;
+    stack[0].t_enter = t_near;
+    stack_ptr = 1;
     
-    // Convert to normalized coordinates [0, 1]
-    vec3 norm_pos = (start_pos - box_min) / (box_max - box_min);
+    int iterations = 0;
+    const int MAX_ITERATIONS = 2000;
     
-    // Clamp to valid range with small epsilon to stay inside
-    norm_pos = clamp(norm_pos, vec3(0.001), vec3(0.999));
+    float closest_hit = t_far;
     
-    // Convert to voxel coordinates
-    vec3 voxel_pos_f = norm_pos * vec3(grid_size);
-    ivec3 voxel = ivec3(floor(voxel_pos_f));
-    
-    // Ensure starting voxel is in bounds
-    voxel = clamp(voxel, ivec3(0), grid_size - ivec3(1));
-    
-    // Step direction
-    ivec3 step_dir = ivec3(sign(ray_dir));
-    
-    // Avoid division by zero
-    vec3 safe_ray_dir = ray_dir;
-    for (int i = 0; i < 3; i++) {
-        if (abs(safe_ray_dir[i]) < 0.00001) {
-            safe_ray_dir[i] = 0.00001 * sign(safe_ray_dir[i]);
-            if (safe_ray_dir[i] == 0.0) safe_ray_dir[i] = 0.00001;
-        }
-    }
-    
-    // Calculate delta_t (how far along ray to move one voxel in each direction)
-    vec3 delta_t = abs(vec3(1.0) / safe_ray_dir) / vec3(grid_size);
-    
-    // Calculate initial t_max (distance to next voxel boundary)
-    vec3 t_max;
-    for (int i = 0; i < 3; i++) {
-        float frac_pos = voxel_pos_f[i] - float(voxel[i]);
-        if (step_dir[i] > 0) {
-            t_max[i] = (1.0 - frac_pos) * delta_t[i];
-        } else {
-            t_max[i] = frac_pos * delta_t[i];
-        }
-    }
-    
-    // Track which face we hit
-    vec3 normal = vec3(0.0);
-    
-    const int max_steps = 1024;
-    float t_current = 0.0;
-    float max_t = (t_far - start_t) / length(box_max - box_min);
-    
-    for (int i = 0; i < max_steps; i++) {
-        // Check bounds
-        if (any(lessThan(voxel, ivec3(0))) || any(greaterThanEqual(voxel, grid_size))) {
-            break;
+    while (stack_ptr > 0 && iterations < MAX_ITERATIONS) {
+        iterations++;
+        
+        // Pop from stack
+        stack_ptr--;
+        StackEntry entry = stack[stack_ptr];
+        
+        // Skip if this node is further than closest hit
+        if (entry.t_enter > closest_hit) {
+            continue;
         }
         
-        // Check if exceeded max distance
-        if (t_current > max_t) {
-            break;
+        // Bounds check
+        if (entry.node_idx >= octree_meta.node_count) {
+            continue;
         }
         
-        uint voxel_value = get_voxel_at(voxel, grid_size);
-        if (voxel_value > 0u) {
-            hit_voxel = voxel_value;
-            hit_normal = normal;
-            hit_t = start_t + t_current * length(box_max - box_min);
-            return true;
-        }
+        OctreeNode node = octree_nodes.nodes[entry.node_idx];
         
-        if (t_max.x < t_max.y) {
-            if (t_max.x < t_max.z) {
-                t_current = t_max.x;
-                t_max.x += delta_t.x;
-                voxel.x += step_dir.x;
-                normal = vec3(-float(step_dir.x), 0.0, 0.0);
-            } else {
-                t_current = t_max.z;
-                t_max.z += delta_t.z;
-                voxel.z += step_dir.z;
-                normal = vec3(0.0, 0.0, -float(step_dir.z));
+        // Check if leaf node
+        if (node.child_ptr == 0u) {
+            uint voxel_id = node.data & 0xFFu;
+            
+            if (voxel_id != 0u) {
+                // Hit a solid voxel!
+                float this_t = max(entry.t_enter, 0.0);
+                
+                // Only accept if closer than previous hits
+                if (this_t < closest_hit) {
+                    closest_hit = this_t;
+                    hit_t = this_t;
+                    hit_voxel = voxel_id;
+                    
+                    vec3 hit_point = ray_origin + ray_dir * hit_t;
+                    
+                    // Calculate normal - which face did we enter through?
+                    vec3 size = entry.box_max - entry.box_min;
+                    vec3 local = (hit_point - entry.box_min) / size;
+                    
+                    // Determine which face (closest to 0 or 1)
+                    const float epsilon = 0.001;
+                    vec3 abs_local = abs(local - 0.5);
+                    float max_component = max(max(abs_local.x, abs_local.y), abs_local.z);
+                    
+                    if (abs(abs_local.x - max_component) < epsilon) {
+                        hit_normal = vec3(local.x < 0.5 ? -1.0 : 1.0, 0, 0);
+                    } else if (abs(abs_local.y - max_component) < epsilon) {
+                        hit_normal = vec3(0, local.y < 0.5 ? -1.0 : 1.0, 0);
+                    } else {
+                        hit_normal = vec3(0, 0, local.z < 0.5 ? -1.0 : 1.0);
+                    }
+                }
             }
-        } else {
-            if (t_max.y < t_max.z) {
-                t_current = t_max.y;
-                t_max.y += delta_t.y;
-                voxel.y += step_dir.y;
-                normal = vec3(0.0, -float(step_dir.y), 0.0);
-            } else {
-                t_current = t_max.z;
-                t_max.z += delta_t.z;
-                voxel.z += step_dir.z;
-                normal = vec3(0.0, 0.0, -float(step_dir.z));
+            continue;
+        }
+        
+        // Branch node - subdivide and push children in front-to-back order
+        vec3 center = (entry.box_min + entry.box_max) * 0.5;
+        
+        // Determine ray direction signs for child ordering
+        vec3 ray_sign = step(0.0, ray_dir);
+        
+        // Store children with their t values for sorting
+        struct ChildEntry {
+            int child_idx;
+            float t_near;
+            vec3 box_min;
+            vec3 box_max;
+        };
+        
+        ChildEntry children[8];
+        int child_count = 0;
+        
+        // Calculate intersections for all 8 children
+        for (int i = 0; i < 8; i++) {
+            vec3 child_min = vec3(
+                (i & 1) != 0 ? center.x : entry.box_min.x,
+                (i & 2) != 0 ? center.y : entry.box_min.y,
+                (i & 4) != 0 ? center.z : entry.box_min.z
+            );
+            vec3 child_max = vec3(
+                (i & 1) != 0 ? entry.box_max.x : center.x,
+                (i & 2) != 0 ? entry.box_max.y : center.y,
+                (i & 4) != 0 ? entry.box_max.z : center.z
+            );
+            
+            float child_t_near, child_t_far;
+            if (intersect_box(ray_origin, ray_dir, child_min, child_max, 
+                            child_t_near, child_t_far)) {
+                if (child_t_near < closest_hit) {
+                    children[child_count].child_idx = i;
+                    children[child_count].t_near = child_t_near;
+                    children[child_count].box_min = child_min;
+                    children[child_count].box_max = child_max;
+                    child_count++;
+                }
+            }
+        }
+        
+        // Simple insertion sort for front-to-back ordering
+        for (int i = 1; i < child_count; i++) {
+            ChildEntry key = children[i];
+            int j = i - 1;
+            while (j >= 0 && children[j].t_near > key.t_near) {
+                children[j + 1] = children[j];
+                j--;
+            }
+            children[j + 1] = key;
+        }
+        
+        // Push children onto stack in reverse order (so closest is processed first)
+        for (int i = child_count - 1; i >= 0; i--) {
+            if (stack_ptr < MAX_STACK) {
+                stack[stack_ptr].node_idx = node.child_ptr + uint(children[i].child_idx);
+                stack[stack_ptr].box_min = children[i].box_min;
+                stack[stack_ptr].box_max = children[i].box_max;
+                stack[stack_ptr].t_enter = children[i].t_near;
+                stack_ptr++;
             }
         }
     }
     
-    return false;
+    return closest_hit < t_far;
 }
 
-// Enhanced lighting
 vec3 calculate_lighting(vec3 normal, vec3 view_dir, vec3 world_pos, vec3 base_color) {
     // Main directional light
     vec3 light_dir = normalize(vec3(0.6, 0.8, 0.5));
@@ -209,13 +266,13 @@ void main() {
         return;
     }
     
-    // DDA raymarch
+    // Traverse octree
     vec3 hit_normal;
     uint hit_voxel;
     float hit_t;
     
-    if (dda_raymarch(ray_origin, ray_dir, box_min, box_max, t_near, t_far, 
-                     hit_normal, hit_voxel, hit_t)) {
+    if (traverse_octree(ray_origin, ray_dir, box_min, box_max, t_near, t_far,
+                        hit_normal, hit_voxel, hit_t)) {
         
         vec3 hit_pos = ray_origin + ray_dir * hit_t;
         vec3 base_color = get_voxel_color(hit_voxel);

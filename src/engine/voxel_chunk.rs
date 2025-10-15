@@ -1,3 +1,5 @@
+// voxel_chunk.rs - Modified with update tracking
+
 use nalgebra_glm::{TVec3, vec3};
 
 pub const CHUNK_SIZE: u8 = 16;
@@ -5,22 +7,28 @@ pub const CHUNK_SIZE: u8 = 16;
 pub type ChunkPosition = TVec3<i32>;
 pub type VoxelID = u8;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChunkUpdateType {
+    Added,
+    Modified,
+    Removed,
+}
+
 pub struct VoxelChunk {
     pub position: ChunkPosition,
     pub voxels: Vec<VoxelID>,
-    pub modified: bool,
+    pub update_type: Option<ChunkUpdateType>,
 }
 
 impl VoxelChunk {
     pub fn new(position: ChunkPosition) -> Self {
         let total_voxels = CHUNK_SIZE as usize * CHUNK_SIZE as usize * CHUNK_SIZE as usize;
         let voxels = vec![0u8; total_voxels];
-        let modified = false;
 
         Self {
-            modified,
             position,
             voxels,
+            update_type: Some(ChunkUpdateType::Added),
         }
     }
 
@@ -55,6 +63,8 @@ impl VoxelChunk {
                 }
             }
         }
+
+        self.update_type = Some(ChunkUpdateType::Added);
     }
 
     #[inline]
@@ -70,6 +80,17 @@ impl VoxelChunk {
     pub fn set(&mut self, x: u8, y: u8, z: u8, val: VoxelID) {
         let idx = Self::get_idx(x, y, z);
         self.voxels[idx] = val;
-        self.modified = true;
+
+        if self.update_type != Some(ChunkUpdateType::Added) {
+            self.update_type = Some(ChunkUpdateType::Modified);
+        }
+    }
+
+    pub fn mark_update_processed(&mut self) {
+        self.update_type = None;
+    }
+
+    pub fn needs_update(&self) -> bool {
+        self.update_type.is_some()
     }
 }

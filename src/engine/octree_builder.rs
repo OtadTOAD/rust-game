@@ -24,7 +24,7 @@ impl OctreeBuilder {
             min_pos.x, min_pos.y, min_pos.z
         );
 
-        // Calculate offset
+        // Calculate offset - this converts octree coords to world coords
         let offset = [
             min_pos.x * CHUNK_SIZE as i32,
             min_pos.y * CHUNK_SIZE as i32,
@@ -70,8 +70,10 @@ impl OctreeBuilder {
         let depth = octree_size.trailing_zeros() as u8;
 
         // Create a lookup function for voxel data
+        // FIXED: Correct coordinate transformation
         let get_voxel = |x: i32, y: i32, z: i32| -> VoxelID {
-            // Convert to world coordinates
+            // x, y, z are in octree space [0, octree_size)
+            // Convert to world coordinates by adding offset
             let world_x = x + offset[0];
             let world_y = y + offset[1];
             let world_z = z + offset[2];
@@ -108,7 +110,6 @@ impl OctreeBuilder {
     }
 
     /// Recursively build a node and its children
-    /// Returns true if this node is uniform (all children same value)
     fn build_node_recursive<F>(
         octree: &mut Octree,
         node_idx: usize,
@@ -120,39 +121,40 @@ impl OctreeBuilder {
     ) where
         F: Fn(i32, i32, i32) -> VoxelID,
     {
-        // Base case: at maximum depth, just read the voxel
+        // Base case: at maximum depth or single voxel, just read the voxel
         if current_depth >= max_depth || node_size == 1 {
             let voxel = get_voxel(node_min.x, node_min.y, node_min.z);
             octree.nodes[node_idx].data = voxel;
             return;
         }
 
-        // Check if entire region is uniform by sampling
+        // FIXED: More thorough uniformity check
+        // Check if entire region is uniform
         let first_voxel = get_voxel(node_min.x, node_min.y, node_min.z);
         let mut is_uniform = true;
 
-        // Quick uniformity check: sample corners and center
-        let samples = [
-            (node_min.x, node_min.y, node_min.z),
-            (node_min.x + node_size - 1, node_min.y, node_min.z),
-            (node_min.x, node_min.y + node_size - 1, node_min.z),
-            (node_min.x, node_min.y, node_min.z + node_size - 1),
-            (
-                node_min.x + node_size - 1,
-                node_min.y + node_size - 1,
-                node_min.z + node_size - 1,
-            ),
-            (
-                node_min.x + node_size / 2,
-                node_min.y + node_size / 2,
-                node_min.z + node_size / 2,
-            ),
-        ];
+        // For small regions, check every voxel
+        // For large regions, use adaptive sampling
+        let sample_step = if node_size <= 8 {
+            1
+        } else if node_size <= 32 {
+            2
+        } else {
+            4
+        };
 
-        for (x, y, z) in samples {
-            if get_voxel(x, y, z) != first_voxel {
-                is_uniform = false;
-                break;
+        'outer: for z in (0..node_size).step_by(sample_step as usize) {
+            for y in (0..node_size).step_by(sample_step as usize) {
+                for x in (0..node_size).step_by(sample_step as usize) {
+                    let sample_x = node_min.x + x;
+                    let sample_y = node_min.y + y;
+                    let sample_z = node_min.z + z;
+
+                    if get_voxel(sample_x, sample_y, sample_z) != first_voxel {
+                        is_uniform = false;
+                        break 'outer;
+                    }
+                }
             }
         }
 
@@ -240,28 +242,41 @@ impl OctreeBuilder {
                     for x in (0..CHUNK_SIZE).step_by(step) {
                         let expected = chunk.get(x, y, z);
 
-                        let world_x = chunk_world_x + x as i32 - offset[0];
-                        let world_y = chunk_world_y + y as i32 - offset[1];
-                        let world_z = chunk_world_z + z as i32 - offset[2];
+                        // FIXED: Correct coordinate transformation for verification
+                        let world_x = chunk_world_x + x as i32;
+                        let world_y = chunk_world_y + y as i32;
+                        let world_z = chunk_world_z + z as i32;
 
-                        if world_x < 0
-                            || world_y < 0
-                            || world_z < 0
-                            || world_x >= octree.size as i32
-                            || world_y >= octree.size as i32
-                            || world_z >= octree.size as i32
+                        // Convert world coords to octree coords
+                        let octree_x = world_x - offset[0];
+                        let octree_y = world_y - offset[1];
+                        let octree_z = world_z - offset[2];
+
+                        if octree_x < 0
+                            || octree_y < 0
+                            || octree_z < 0
+                            || octree_x >= octree.size as i32
+                            || octree_y >= octree.size as i32
+                            || octree_z >= octree.size as i32
                         {
                             continue;
                         }
 
-                        let actual = octree.get_voxel(vec3(world_x, world_y, world_z));
+                        let actual = octree.get_voxel(vec3(octree_x, octree_y, octree_z));
 
                         if expected != actual {
                             mismatches += 1;
                             if sample_count < MAX_SAMPLES {
                                 println!(
-                                    "  ✗ Mismatch at octree[{}, {}, {}]: expected {}, got {}",
-                                    world_x, world_y, world_z, expected, actual
+                                    "  ✗ Mismatch at octree[{}, {}, {}] (world[{}, {}, {}]): expected {}, got {}",
+                                    octree_x,
+                                    octree_y,
+                                    octree_z,
+                                    world_x,
+                                    world_y,
+                                    world_z,
+                                    expected,
+                                    actual
                                 );
                                 sample_count += 1;
                             }

@@ -1,4 +1,4 @@
-use crate::engine::VoxelWorld;
+use crate::engine::{GpuOctree, GpuOctreeMetadata, GpuOctreeNode, VoxelWorld};
 use crate::system::dummy_vertex::DummyVertex;
 
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
@@ -95,8 +95,8 @@ pub struct System {
     image_index: u32,
     acquire_future: Option<SwapchainAcquireFuture>,
 
-    voxel_image: Option<Arc<StorageImage>>,
-    voxel_image_view: Option<Arc<ImageView<StorageImage>>>,
+    octree_node_buffer: Option<Arc<CpuAccessibleBuffer<[GpuOctreeNode]>>>,
+    octree_metadata_buffer: Option<Arc<CpuAccessibleBuffer<GpuOctreeMetadata>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -375,8 +375,8 @@ impl System {
         let commands = None;
         let image_index = 0;
         let acquire_future = None;
-        let voxel_image = None;
-        let voxel_image_view = None;
+        let octree_node_buffer = None;
+        let octree_metadata_buffer = None;
 
         System {
             surface,
@@ -398,155 +398,31 @@ impl System {
             commands,
             image_index,
             acquire_future,
-            voxel_image,
-            voxel_image_view,
+            octree_node_buffer,
+            octree_metadata_buffer,
         }
     }
 
-    /*
-    pub fn create_voxel_image(
-        &self,
-        voxel_world: &VoxelWorld,
-    ) -> (Arc<StorageImage>, Arc<ImageView<StorageImage>>) {
-        let (_min_pos, _max_pos, world_size) = voxel_world.get_world_bounds();
+    pub fn create_octree_buffers(&mut self, gpu_octree: &GpuOctree) {
+        println!("Creating GPU octree buffers...");
 
-        let image = StorageImage::new(
-            &self.memory_allocator,
-            ImageDimensions::Dim3d {
-                width: world_size[0],
-                height: world_size[1],
-                depth: world_size[2],
-            },
-            Format::R8_UINT,
-            Some(self.queue.queue_family_index()),
-        )
-        .unwrap();
+        let node_buffer = gpu_octree.create_node_buffer(&self.memory_allocator);
+        let metadata_buffer = gpu_octree.create_metadata_buffer(&self.memory_allocator);
 
-        let image_view = ImageView::new_default(image.clone()).unwrap();
-        (image, image_view)
+        self.octree_node_buffer = Some(node_buffer);
+        self.octree_metadata_buffer = Some(metadata_buffer);
+
+        println!("  ✓ Octree buffers created");
     }
 
-    pub fn upload_voxel_data(&self, voxel_world: &VoxelWorld, voxel_image: &Arc<StorageImage>) {
-        let staging_buffer = voxel_world.create_staging_buffer(&self.memory_allocator);
+    pub fn update_octree(&mut self, gpu_octree: &GpuOctree) {
+        println!("Updating GPU octree buffers...");
 
-        let mut builder = AutoCommandBufferBuilder::primary(
-            &StandardCommandBufferAllocator::new(self.device.clone(), Default::default()),
-            self.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
+        // For now, just recreate the buffers
+        // Later we can optimize this to only update changed nodes
+        self.create_octree_buffers(gpu_octree);
 
-        builder
-            .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-                staging_buffer.clone(),
-                voxel_image.clone(),
-            ))
-            .unwrap();
-
-        let finished = builder
-            .build()
-            .unwrap()
-            .execute(self.queue.clone())
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap();
-
-        finished.wait(None).unwrap();
-    }
-
-    pub fn set_voxel_image(
-        &mut self,
-        image: Arc<StorageImage>,
-        image_view: Arc<ImageView<StorageImage>>,
-    ) {
-        self.voxel_image = Some(image);
-        self.voxel_image_view = Some(image_view);
-    }
-
-    pub fn update_voxel_image_dynamic(
-        &self,
-        voxel_world: &VoxelWorld,
-        staging_buffer: &Arc<CpuAccessibleBuffer<[u8]>>,
-        voxel_image: &Arc<StorageImage>,
-    ) {
-        let mut builder = AutoCommandBufferBuilder::primary(
-            &StandardCommandBufferAllocator::new(self.device.clone(), Default::default()),
-            self.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
-
-        builder
-            .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-                staging_buffer.clone(),
-                voxel_image.clone(),
-            ))
-            .unwrap();
-
-        let command_buffer = builder.build().unwrap();
-
-        let finished = command_buffer
-            .execute(self.queue.clone())
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap();
-
-        finished.wait(None).unwrap();
-    }*/
-
-    pub fn create_voxel_image(&mut self, size: [u32; 3]) {
-        use vulkano::format::Format;
-        use vulkano::image::ImageDimensions;
-
-        let image = StorageImage::new(
-            &self.memory_allocator,
-            ImageDimensions::Dim3d {
-                width: size[0].max(1),
-                height: size[1].max(1),
-                depth: size[2].max(1),
-            },
-            Format::R8_UINT,
-            Some(self.queue.queue_family_index()),
-        )
-        .unwrap();
-
-        let image_view = ImageView::new_default(image.clone()).unwrap();
-        self.voxel_image = Some(image);
-        self.voxel_image_view = Some(image_view);
-    }
-
-    pub fn update_voxel_image(&mut self, voxel_world: &mut VoxelWorld) {
-        if !voxel_world.needs_gpu_update {
-            return;
-        }
-
-        if let Some(image) = &self.voxel_image {
-            let staging_buffer = voxel_world.create_staging_buffer(&self.memory_allocator);
-
-            let mut builder = AutoCommandBufferBuilder::primary(
-                &self.command_buffer_allocator,
-                self.queue.queue_family_index(),
-                CommandBufferUsage::OneTimeSubmit,
-            )
-            .unwrap();
-
-            builder
-                .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-                    staging_buffer,
-                    image.clone(),
-                ))
-                .unwrap();
-
-            let command_buffer = builder.build().unwrap();
-            let future = vulkano::sync::now(self.queue.device().clone())
-                .then_execute(self.queue.clone(), command_buffer)
-                .unwrap()
-                .then_signal_fence_and_flush()
-                .unwrap();
-            future.wait(None).unwrap();
-
-            voxel_world.needs_gpu_update = false;
-        }
+        println!("  ✓ Octree updated");
     }
 
     pub fn voxel(&mut self) {
@@ -565,29 +441,27 @@ impl System {
             }
         }
 
-        let voxel_buffer = self
-            .voxel_image_view
-            .as_ref()
-            .expect("Voxel image not set!");
+        if self.octree_node_buffer.is_none() || self.octree_metadata_buffer.is_none() {
+            return;
+        }
 
-        let sampler = Sampler::new(
-            self.device.clone(),
-            SamplerCreateInfo {
-                mag_filter: Filter::Nearest,
-                min_filter: Filter::Nearest,
-                address_mode: [SamplerAddressMode::ClampToEdge; 3],
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let node_buffer = self
+            .octree_node_buffer
+            .as_ref()
+            .expect("Octree node buffer not set!");
+        let metadata_buffer = self
+            .octree_metadata_buffer
+            .as_ref()
+            .expect("Octree metadata buffer not set!");
 
         let voxel_layout = self.voxel_pipeline.layout().set_layouts().get(0).unwrap();
         let voxel_set = PersistentDescriptorSet::new(
             &self.descriptor_set_allocator,
             voxel_layout.clone(),
             [
-                WriteDescriptorSet::image_view_sampler(0, voxel_buffer.clone(), sampler.clone()),
-                WriteDescriptorSet::buffer(1, self.vp_buffer.clone()),
+                WriteDescriptorSet::buffer(0, node_buffer.clone()),
+                WriteDescriptorSet::buffer(1, metadata_buffer.clone()),
+                WriteDescriptorSet::buffer(2, self.vp_buffer.clone()),
             ],
         )
         .unwrap();
@@ -596,14 +470,14 @@ impl System {
             .as_mut()
             .unwrap()
             .set_viewport(0, [self.viewport.clone()])
-            .bind_pipeline_graphics(self.voxel_pipeline.clone()) // your voxel raymarch pipeline
+            .bind_pipeline_graphics(self.voxel_pipeline.clone())
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
                 self.voxel_pipeline.layout().clone(),
                 0,
                 voxel_set.clone(),
             )
-            .bind_vertex_buffers(0, self.dummy_verts.clone()) // fullscreen triangle
+            .bind_vertex_buffers(0, self.dummy_verts.clone())
             .draw(self.dummy_verts.len() as u32, 1, 0, 0)
             .unwrap();
     }
