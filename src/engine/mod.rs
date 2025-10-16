@@ -6,6 +6,7 @@ mod octree;
 mod octree_builder;
 mod octree_gpu;
 mod octree_stats_formatter;
+mod octree_world;
 mod voxel_chunk;
 mod voxel_world;
 
