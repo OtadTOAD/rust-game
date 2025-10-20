@@ -1,20 +1,14 @@
 mod camera;
+mod chunk_manager;
 mod ecs;
 mod engine;
+mod gpu_metadata;
 mod input_manager;
-mod octree;
-mod octree_builder;
-mod octree_gpu;
-mod octree_stats_formatter;
-mod octree_world;
-mod voxel_chunk;
-mod voxel_world;
+mod unified_octree;
+mod world_generator;
 
 pub use engine::Engine;
 pub use input_manager::InputManager;
-pub use voxel_world::VoxelWorld;
 
-pub use octree::Octree;
-pub use octree_gpu::GpuOctree;
-pub use octree_gpu::GpuOctreeMetadata;
-pub use octree_gpu::GpuOctreeNode;
+pub use gpu_metadata::OctreeMetadata;
+pub use unified_octree::OctreeNode;

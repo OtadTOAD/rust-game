@@ -15,9 +15,7 @@ layout(set = 0, binding = 1) uniform OctreeMetadata {
     uint octree_size;
     uint node_count;
     uint max_depth;
-    int world_offset_x;
-    int world_offset_y;
-    int world_offset_z;
+    uint _padding;
 } octree_meta;
 
 layout(set = 0, binding = 2) uniform CameraUBO {
@@ -250,15 +248,15 @@ void main() {
     vec2 uv = gl_FragCoord.xy / camera.resolution;
     vec3 ray_dir = ray_direction(uv);
     vec3 ray_origin = camera.cam_pos_and_scale.xyz;
-    float world_scale = camera.cam_pos_and_scale.w;
     vec3 view_dir = -ray_dir;
 
-    vec3 box_min = vec3(-world_scale * 0.5);
-    vec3 box_max = vec3(world_scale * 0.5);
+    // Use actual octree size from metadata
+    float octree_size_f = float(octree_meta.octree_size);
+    vec3 box_min = vec3(0.0);
+    vec3 box_max = vec3(octree_size_f);
     
     float t_near, t_far;
     
-    // Sky gradient
     vec3 sky_color = mix(vec3(0.5, 0.7, 0.9), vec3(0.2, 0.3, 0.5), uv.y);
     
     if (!intersect_box(ray_origin, ray_dir, box_min, box_max, t_near, t_far)) {
@@ -266,7 +264,6 @@ void main() {
         return;
     }
     
-    // Traverse octree
     vec3 hit_normal;
     uint hit_voxel;
     float hit_t;
@@ -276,11 +273,8 @@ void main() {
         
         vec3 hit_pos = ray_origin + ray_dir * hit_t;
         vec3 base_color = get_voxel_color(hit_voxel);
-        
-        // Calculate lighting
         vec3 lit_color = calculate_lighting(hit_normal, view_dir, hit_pos, base_color);
         
-        // Distance fog
         float fog_factor = smoothstep(t_far * 0.6, t_far, hit_t);
         lit_color = mix(lit_color, sky_color * 0.7, fog_factor * 0.3);
         

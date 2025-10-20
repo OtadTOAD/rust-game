@@ -1,11 +1,11 @@
-use crate::engine::{GpuOctree, GpuOctreeMetadata, GpuOctreeNode, VoxelWorld};
+use crate::engine::{Engine, OctreeMetadata, OctreeNode};
 use crate::system::dummy_vertex::DummyVertex;
 
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo, PrimaryAutoCommandBuffer,
-    RenderPassBeginInfo, SubpassContents,
+    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo,
+    SubpassContents,
 };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
@@ -13,7 +13,7 @@ use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
-use vulkano::image::{AttachmentImage, ImageAccess, StorageImage, SwapchainImage};
+use vulkano::image::{AttachmentImage, ImageAccess, SwapchainImage};
 use vulkano::instance::debug::{
     DebugUtilsMessageSeverity, DebugUtilsMessageType, DebugUtilsMessenger,
     DebugUtilsMessengerCreateInfo,
@@ -28,7 +28,6 @@ use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
-use vulkano::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
 use vulkano::swapchain::{
     self, AcquireError, PresentMode, Surface, Swapchain, SwapchainAcquireFuture,
     SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo,
@@ -95,8 +94,9 @@ pub struct System {
     image_index: u32,
     acquire_future: Option<SwapchainAcquireFuture>,
 
-    octree_node_buffer: Option<Arc<CpuAccessibleBuffer<[GpuOctreeNode]>>>,
-    octree_metadata_buffer: Option<Arc<CpuAccessibleBuffer<GpuOctreeMetadata>>>,
+    octree_node_buffers: [Option<Arc<CpuAccessibleBuffer<[OctreeNode]>>>; 2],
+    octree_metadata_buffers: [Option<Arc<CpuAccessibleBuffer<OctreeMetadata>>>; 2],
+    current_buffer_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -152,7 +152,7 @@ impl System {
                 library,
                 InstanceCreateInfo {
                     enabled_extensions: extensions,
-                    enumerate_portability: true, // required for MoltenVK on macOS
+                    enumerate_portability: true,
                     max_api_version: Some(Version::V1_1),
                     enabled_layers: layers,
                     ..Default::default()
@@ -204,22 +204,18 @@ impl System {
                     .iter()
                     .enumerate()
                     .position(|(i, q)| {
-                        // pick first queue_familiy_index that handles graphics and can draw on the surface created by winit
                         q.queue_flags.graphics
                             && p.surface_support(i as u32, &surface).unwrap_or(false)
                     })
                     .map(|i| (p, i as u32))
             })
-            .min_by_key(|(p, _)| {
-                // lower score for preferred device types
-                match p.properties().device_type {
-                    PhysicalDeviceType::DiscreteGpu => 0,
-                    PhysicalDeviceType::IntegratedGpu => 1,
-                    PhysicalDeviceType::VirtualGpu => 2,
-                    PhysicalDeviceType::Cpu => 3,
-                    PhysicalDeviceType::Other => 4,
-                    _ => 5,
-                }
+            .min_by_key(|(p, _)| match p.properties().device_type {
+                PhysicalDeviceType::DiscreteGpu => 0,
+                PhysicalDeviceType::IntegratedGpu => 1,
+                PhysicalDeviceType::VirtualGpu => 2,
+                PhysicalDeviceType::Cpu => 3,
+                PhysicalDeviceType::Other => 4,
+                _ => 5,
             })
             .expect("No suitable physical device found");
 
@@ -375,8 +371,6 @@ impl System {
         let commands = None;
         let image_index = 0;
         let acquire_future = None;
-        let octree_node_buffer = None;
-        let octree_metadata_buffer = None;
 
         System {
             surface,
@@ -398,31 +392,95 @@ impl System {
             commands,
             image_index,
             acquire_future,
-            octree_node_buffer,
-            octree_metadata_buffer,
+
+            octree_node_buffers: [None, None],
+            octree_metadata_buffers: [None, None],
+            current_buffer_index: 0,
         }
     }
 
-    pub fn create_octree_buffers(&mut self, gpu_octree: &GpuOctree) {
-        println!("Creating GPU octree buffers...");
+    pub fn update_octree_buffers(&mut self, engine: &mut Engine) {
+        if !engine.needs_gpu_upload() {
+            return;
+        }
 
-        let node_buffer = gpu_octree.create_node_buffer(&self.memory_allocator);
-        let metadata_buffer = gpu_octree.create_metadata_buffer(&self.memory_allocator);
+        let write_index = (self.current_buffer_index + 1) % 2;
+        if engine.octree.needs_full_upload() || self.octree_node_buffers[write_index].is_none() {
+            self.octree_node_buffers[write_index] =
+                Some(engine.create_octree_buffer(&self.memory_allocator));
 
-        self.octree_node_buffer = Some(node_buffer);
-        self.octree_metadata_buffer = Some(metadata_buffer);
+            let metadata = OctreeMetadata::new(
+                engine.octree.size,
+                engine.octree.nodes.len(),
+                engine.octree.depth,
+            );
+            self.octree_metadata_buffers[write_index] =
+                Some(metadata.create_buffer(&self.memory_allocator));
 
-        println!("  ✓ Octree buffers created");
+            println!(
+                "Full octree buffer upload: {} nodes",
+                engine.octree.nodes.len()
+            );
+
+            engine.octree.clear_dirty_state();
+            engine.octree_buffer_dirty = false;
+        } else {
+            if let Some(buffer) = &self.octree_node_buffers[write_index] {
+                if buffer.len() != engine.octree.nodes.len() as u64 {
+                    println!("Buffer size mismatch, recreating...");
+                    self.octree_node_buffers[write_index] =
+                        Some(engine.create_octree_buffer(&self.memory_allocator));
+
+                    let metadata = OctreeMetadata::new(
+                        engine.octree.size,
+                        engine.octree.nodes.len(),
+                        engine.octree.depth,
+                    );
+                    self.octree_metadata_buffers[write_index] =
+                        Some(metadata.create_buffer(&self.memory_allocator));
+                } else {
+                    match buffer.write() {
+                        Ok(mut write) => {
+                            let ranges = engine.octree.get_dirty_ranges();
+                            let mut total_updated = 0;
+
+                            for (start, end) in ranges {
+                                let count = end - start;
+                                write[start..end].copy_from_slice(&engine.octree.nodes[start..end]);
+                                total_updated += count;
+                            }
+
+                            println!("Partial GPU update: {} nodes", total_updated);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to write to buffer: {:?}", e);
+                            return;
+                        }
+                    }
+                }
+
+                engine.octree.clear_dirty_state();
+                engine.octree_buffer_dirty = false;
+            }
+        }
     }
 
-    pub fn update_octree(&mut self, gpu_octree: &GpuOctree) {
-        println!("Updating GPU octree buffers...");
+    pub fn init_octree_buffers(&mut self, engine: &Engine) {
+        for i in 0..2 {
+            self.octree_node_buffers[i] = Some(engine.create_octree_buffer(&self.memory_allocator));
 
-        // For now, just recreate the buffers
-        // Later we can optimize this to only update changed nodes
-        self.create_octree_buffers(gpu_octree);
+            let metadata = OctreeMetadata::new(
+                engine.octree.size,
+                engine.octree.nodes.len(),
+                engine.octree.depth,
+            );
+            self.octree_metadata_buffers[i] = Some(metadata.create_buffer(&self.memory_allocator));
+        }
 
-        println!("  ✓ Octree updated");
+        println!(
+            "Initialized double-buffered octree: {} nodes",
+            engine.octree.nodes.len()
+        );
     }
 
     pub fn voxel(&mut self) {
@@ -441,18 +499,16 @@ impl System {
             }
         }
 
-        if self.octree_node_buffer.is_none() || self.octree_metadata_buffer.is_none() {
-            return;
-        }
-
-        let node_buffer = self
-            .octree_node_buffer
-            .as_ref()
-            .expect("Octree node buffer not set!");
-        let metadata_buffer = self
-            .octree_metadata_buffer
-            .as_ref()
-            .expect("Octree metadata buffer not set!");
+        let (node_buffer, metadata_buffer) = match (
+            &self.octree_node_buffers[self.current_buffer_index],
+            &self.octree_metadata_buffers[self.current_buffer_index],
+        ) {
+            (Some(nodes), Some(meta)) => (nodes, meta),
+            _ => {
+                eprintln!("Octree buffers not initialized!");
+                return;
+            }
+        };
 
         let voxel_layout = self.voxel_pipeline.layout().set_layouts().get(0).unwrap();
         let voxel_set = PersistentDescriptorSet::new(
@@ -481,7 +537,6 @@ impl System {
             .draw(self.dummy_verts.len() as u32, 1, 0, 0)
             .unwrap();
     }
-
     pub fn finish(&mut self, previous_frame_end: &mut Option<Box<dyn GpuFuture>>) {
         match self.render_stage {
             RenderStage::Voxel => {}
@@ -496,6 +551,10 @@ impl System {
                 self.render_stage = RenderStage::Stopped;
                 return;
             }
+        }
+
+        if matches!(self.render_stage, RenderStage::Voxel) {
+            self.current_buffer_index = (self.current_buffer_index + 1) % 2;
         }
 
         let mut commands = self.commands.take().unwrap();

@@ -1,6 +1,7 @@
 mod engine;
 mod system;
 
+use nalgebra_glm::vec3;
 use system::System;
 
 use vulkano::sync;
@@ -33,18 +34,26 @@ fn main() {
     let event_loop = EventLoop::new();
     let mut system = System::new(&event_loop);
 
-    // Made this Arc/Mutex because both rendering loop and tick loop need access of this obj
-    let engine = Arc::new(Mutex::new(Engine::new()));
+    let engine = Arc::new(Mutex::new(Engine::with_sphere(
+        8,
+        vec3(0.0, 0.0, 0.0),
+        100.0,
+    )));
 
     {
         let mut e = engine.lock().unwrap();
         e.init();
 
-        if let Some(gpu_octree) = &e.octree_gpu {
-            system.create_octree_buffers(gpu_octree);
-        } else {
-            //panic!("GPU octree not initialized!");
+        let (filled, total) = e.debug_voxel_count();
+        println!("\n=== Initial State ===");
+        println!("Filled voxels: {} / {}", filled, total);
+        println!("Stats: {}", e.get_stats());
+
+        if filled == 0 {
+            println!("WARNING: No voxels generated! World might be empty.");
         }
+
+        system.init_octree_buffers(&e);
     }
 
     let mut previous_frame_end =
@@ -103,12 +112,7 @@ fn main() {
                 system.set_view(&e.camera.view);
             }
 
-            if e.octree_needs_gpu_upload {
-                if let Some(gpu_octree) = &e.octree_gpu {
-                    system.update_octree(gpu_octree);
-                }
-                e.octree_needs_gpu_upload = false;
-            }
+            system.update_octree_buffers(&mut e);
 
             system.start();
             system.voxel();

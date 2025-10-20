@@ -1,231 +1,286 @@
 use hecs::World as EcsWorld;
-use nalgebra_glm::{look_at, vec3};
+use nalgebra_glm::{Vec3, look_at, vec3};
+use std::sync::Arc;
+use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
+use vulkano::memory::allocator::StandardMemoryAllocator;
 
 use crate::engine::{
-    InputManager, VoxelWorld, camera::Camera, octree::Octree, octree_builder::OctreeBuilder,
-    octree_gpu::GpuOctree,
+    InputManager,
+    camera::Camera,
+    chunk_manager::ChunkManager,
+    unified_octree::{CHUNK_SIZE, OctreeNode, UnifiedOctree},
+    world_generator::{WorldGenerator, create_sphere_world, create_terrain_world},
 };
 
 pub struct Engine {
     pub input_manager: InputManager,
-    pub voxel: VoxelWorld,
     pub camera: Camera,
     pub world: EcsWorld,
 
-    pub octree: Option<Octree>,
-    pub octree_offset: [i32; 3],
-    pub octree_gpu: Option<GpuOctree>,
-    pub octree_needs_gpu_upload: bool,
+    pub octree: UnifiedOctree,
+    pub chunk_manager: ChunkManager,
 
-    frames_since_last_compact: u32,
+    pub octree_buffer_dirty: bool,
+
+    frames_since_compact: u32,
     compact_every_n_frames: u32,
-    total_chunk_updates: usize,
+
+    render_distance: i32,
 }
 
 impl Engine {
-    pub fn new() -> Self {
+    pub fn new(render_distance: i32, generator: Arc<dyn WorldGenerator>) -> Self {
+        let world_size = (render_distance * 2 + 1) * CHUNK_SIZE;
+        let octree_size = (world_size as u32).next_power_of_two();
+
+        println!("Initializing engine:");
+        println!("  Render distance: {} chunks", render_distance);
+        println!("  World size: {}^3 voxels", world_size);
+        println!("  Octree size: {}^3", octree_size);
+        println!("  Generator: {}", generator.name());
+
+        let mut octree = UnifiedOctree::new(octree_size);
+
+        let center = octree_size as i32 / 2;
+
+        println!("  World center: ({}, {}, {})", center, center, center);
+
+        let mut chunk_manager = ChunkManager::new(generator, render_distance);
+
+        let max_safe_offset = (octree_size as f32 / 2.0) * 0.7;
+        let camera_pos_f = vec3(
+            center as f32 + max_safe_offset,
+            center as f32 + max_safe_offset,
+            center as f32 + max_safe_offset,
+        );
+
+        let spawn_pos = vec3(
+            camera_pos_f.x.floor() as i32,
+            camera_pos_f.y.floor() as i32,
+            camera_pos_f.z.floor() as i32,
+        );
+
+        println!("\n=== Initial Chunk Loading ===");
+        println!("Octree bounds: 0 to {}", octree_size - 1);
+        println!("Octree center: ({}, {}, {})", center, center, center);
+        println!(
+            "Camera position: ({:.1}, {:.1}, {:.1})",
+            camera_pos_f.x, camera_pos_f.y, camera_pos_f.z
+        );
+        println!(
+            "Spawn chunk position: ({}, {}, {})",
+            spawn_pos.x, spawn_pos.y, spawn_pos.z
+        );
+        chunk_manager.update(spawn_pos, &mut octree);
+
+        let stats = octree.get_stats();
+        println!(
+            "After loading: {} nodes, {} filled leaves",
+            stats.total_nodes, stats.filled_leaf_nodes
+        );
+
         Self {
             input_manager: InputManager::new(),
-            voxel: VoxelWorld::new(5),
             world: EcsWorld::new(),
             camera: Camera {
                 view: look_at(
-                    &vec3(25.0, 25.0, 25.0),
-                    &vec3(0.0, 0.0, 0.0),
+                    &camera_pos_f,
+                    &vec3(center as f32, center as f32, center as f32),
                     &vec3(0.0, 1.0, 0.0),
                 ),
-                camera_pos: vec3(25.0, 25.0, 25.0),
+                camera_pos: camera_pos_f,
                 requires_update: true,
             },
-
-            octree: None,
-            octree_offset: [0, 0, 0],
-            octree_gpu: None,
-            octree_needs_gpu_upload: false,
-
-            frames_since_last_compact: 0,
+            chunk_manager,
+            octree,
+            octree_buffer_dirty: true,
+            frames_since_compact: 0,
             compact_every_n_frames: 600,
-            total_chunk_updates: 0,
+            render_distance,
         }
     }
 
-    pub fn get_octree(&mut self) -> Option<(&GpuOctree, &mut Octree)> {
-        match (self.octree_gpu.as_ref(), self.octree.as_mut()) {
-            (Some(g), Some(o)) => Some((g, o)),
-            _ => None,
-        }
+    pub fn with_sphere(render_distance: i32, offset: Vec3, radius: f32) -> Self {
+        let world_size = (render_distance * 2 + 1) * CHUNK_SIZE;
+        let octree_size = (world_size as u32).next_power_of_two();
+        let octree_center = octree_size as i32 / 2;
+
+        let sphere_center = vec3(
+            octree_center as f32 + offset.x,
+            octree_center as f32 + offset.y,
+            octree_center as f32 + offset.z,
+        );
+
+        Self::new(
+            render_distance,
+            create_sphere_world(sphere_center, radius).into(),
+        )
     }
 
-    pub fn init(&mut self) {
-        self.voxel.load_chunks([0.0, 0.0, 0.0].into());
-        self.rebuild_octree();
+    pub fn with_terrain(render_distance: i32, seed: u32) -> Self {
+        Self::new(render_distance, create_terrain_world(seed).into())
     }
 
-    pub fn rebuild_octree(&mut self) {
-        println!("\n=== Building Octree ===");
+    pub fn init(&mut self) {}
 
-        let (octree, offset) = OctreeBuilder::from_voxel_world(&self.voxel);
-
-        if let Err(e) = OctreeBuilder::verify_octree(&self.voxel, &octree, offset) {
-            eprintln!("ERROR: Octree verification failed: {}", e);
-        }
-
-        let stats = octree.get_stats();
-        let (_min, _max, size) = self.voxel.get_world_bounds();
-        OctreeBuilder::print_stats(&stats, size);
-
-        let gpu_octree = GpuOctree::from_octree(&octree, offset);
-
-        self.octree = Some(octree);
-        self.octree_offset = offset;
-        self.octree_gpu = Some(gpu_octree);
-        self.octree_needs_gpu_upload = true;
-        self.total_chunk_updates = 0;
-        self.frames_since_last_compact = 0;
+    pub fn create_octree_buffer(
+        &self,
+        allocator: &Arc<StandardMemoryAllocator>,
+    ) -> Arc<CpuAccessibleBuffer<[OctreeNode]>> {
+        CpuAccessibleBuffer::from_iter(
+            allocator,
+            BufferUsage {
+                storage_buffer: true,
+                ..Default::default()
+            },
+            false,
+            self.octree.nodes.iter().cloned(),
+        )
+        .expect("Failed to create octree buffer")
     }
 
-    /// Unified update function that handles all chunk updates
-    fn update_octree(&mut self, max_updates: usize, verbose: bool) {
-        let (updates, removals) = self.voxel.get_pending_updates(max_updates);
-
-        if updates.is_empty() && removals.is_empty() {
+    pub fn update_gpu_buffer(&mut self, buffer: &Arc<CpuAccessibleBuffer<[OctreeNode]>>) {
+        if !self.octree.needs_gpu_upload() {
             return;
         }
 
-        if let Some(octree) = &mut self.octree {
-            let start = std::time::Instant::now();
-
-            // Process removals first
-            if !removals.is_empty() {
-                octree.clear_chunks_batch(&removals, self.octree_offset);
-                if verbose {
-                    println!(
-                        "  Cleared {} chunks in {:?}",
-                        removals.len(),
-                        start.elapsed()
-                    );
-                }
-            }
-
-            // Batch process updates
-            for update in &updates {
-                if let Some(chunk_data) = self.voxel.get_chunk_voxels(&update.position) {
-                    octree.update_chunk_region(update.position, &chunk_data, self.octree_offset);
-                }
-            }
-
-            self.total_chunk_updates += updates.len();
-
-            if verbose {
-                let total_time = start.elapsed();
-                println!("  ✓ Updated {} chunks in {:?}", updates.len(), total_time);
-
-                let stats = octree.get_stats();
-                if stats.total_updates > 0 {
-                    println!(
-                        "  Cache hit rate: {:.1}% ({}/{})",
-                        stats.cache_hit_rate, stats.cache_hits, stats.total_updates
-                    );
-                }
-                println!(
-                    "  Total nodes: {} (active) + {} (free)",
-                    stats.total_nodes, stats.free_nodes
-                );
-            }
-
-            // Update GPU octree
-            if let Some(gpu_octree) = &mut self.octree_gpu {
-                *gpu_octree = GpuOctree::from_octree(octree, self.octree_offset);
-                self.octree_needs_gpu_upload = true;
-            }
+        if self.octree.needs_full_upload() {
+            let mut write = buffer.write().unwrap();
+            write.copy_from_slice(&self.octree.nodes);
+            println!(
+                "  Full GPU buffer update: {} nodes",
+                self.octree.nodes.len()
+            );
         } else {
-            self.rebuild_octree();
+            let ranges = self.octree.get_dirty_ranges();
+            let mut write = buffer.write().unwrap();
+
+            let mut total_updated = 0;
+            let len = ranges.len();
+            for (start, end) in ranges {
+                let count = end - start;
+                write[start..end].copy_from_slice(&self.octree.nodes[start..end]);
+                total_updated += count;
+            }
+            println!(
+                "  Partial GPU update: {} nodes in {} ranges",
+                total_updated, len
+            );
         }
+
+        self.octree.clear_dirty_state();
+        self.octree_buffer_dirty = false;
+    }
+
+    pub fn needs_gpu_upload(&self) -> bool {
+        self.octree_buffer_dirty || self.octree.needs_gpu_upload()
     }
 
     pub fn tick(&mut self, delta: f32) {
         self.camera.move_update(&self.input_manager, delta);
 
-        let updated = self.voxel.load_chunks(self.camera.camera_pos);
+        let camera_voxel = vec3(
+            self.camera.camera_pos.x.floor() as i32,
+            self.camera.camera_pos.y.floor() as i32,
+            self.camera.camera_pos.z.floor() as i32,
+        );
 
-        if updated && self.needs_full_rebuild() {
-            self.rebuild_octree();
-        } else if self.voxel.has_pending_updates() {
-            let pending_count = self.voxel.pending_update_count();
-
-            // Adaptive update batch size based on queue depth
-            let (batch_size, verbose) = match pending_count {
-                0 => return,
-                1..=20 => (4, false),
-                21..=50 => (8, false),
-                _ => (16, true),
-            };
-
-            self.update_octree(batch_size, verbose);
+        if self.chunk_manager.update(camera_voxel, &mut self.octree) {
+            self.octree_buffer_dirty = true;
         }
 
-        // Periodic compaction
-        self.frames_since_last_compact += 1;
-        if self.frames_since_last_compact >= self.compact_every_n_frames {
-            self.maybe_compact_octree();
-            self.frames_since_last_compact = 0;
+        self.frames_since_compact += 1;
+        if self.frames_since_compact >= self.compact_every_n_frames {
+            self.maybe_compact();
+            self.frames_since_compact = 0;
         }
     }
 
-    fn maybe_compact_octree(&mut self) {
-        if let Some(octree) = &mut self.octree {
-            let stats = octree.get_stats();
+    fn maybe_compact(&mut self) {
+        let stats = self.octree.get_stats();
+        let fragmentation = stats.free_nodes as f32 / stats.total_nodes.max(1) as f32;
 
-            // Only compact if there's significant fragmentation
-            let fragmentation_ratio = stats.free_nodes as f32 / stats.total_nodes.max(1) as f32;
+        if fragmentation > 0.2 || self.octree.total_updates > 100 {
+            println!("\n=== Compacting Octree ===");
+            println!("  Fragmentation: {:.1}%", fragmentation * 100.0);
+            println!("  Free nodes: {}", stats.free_nodes);
 
-            if fragmentation_ratio > 0.2 || self.total_chunk_updates > 100 {
-                println!("\n=== Compacting Octree ===");
-                println!(
-                    "  Fragmentation: {:.1}% ({} free nodes)",
-                    fragmentation_ratio * 100.0,
-                    stats.free_nodes
-                );
-                println!(
-                    "  Total chunk updates since last compact: {}",
-                    self.total_chunk_updates
-                );
+            let start = std::time::Instant::now();
+            self.octree.compact();
 
-                let start = std::time::Instant::now();
-                octree.compact();
-                let duration = start.elapsed();
+            let new_stats = self.octree.get_stats();
+            let saved =
+                (stats.total_nodes - new_stats.total_nodes) * std::mem::size_of::<OctreeNode>();
 
-                let new_stats = octree.get_stats();
-                let node_size = std::mem::size_of::<crate::engine::octree::OctreeNode>();
-                let bytes_saved = (stats.total_nodes - new_stats.total_nodes) * node_size;
+            println!("  ✓ Compacted in {:?}", start.elapsed());
+            println!(
+                "  Saved: {} nodes ({:.2} MB)",
+                stats.total_nodes - new_stats.total_nodes,
+                saved as f32 / (1024.0 * 1024.0)
+            );
 
-                println!("  ✓ Compaction complete in {:?}", duration);
-                println!(
-                    "  Memory saved: {} bytes ({:.2} MB)",
-                    bytes_saved,
-                    bytes_saved as f32 / (1024.0 * 1024.0)
-                );
+            self.octree_buffer_dirty = true;
+        }
+    }
 
-                // Update GPU after compaction
-                if let Some(gpu_octree) = &mut self.octree_gpu {
-                    *gpu_octree = GpuOctree::from_octree(octree, self.octree_offset);
-                    self.octree_needs_gpu_upload = true;
-                }
+    pub fn place_voxel(&mut self, pos: Vec3, voxel_id: u8) {
+        let voxel_pos = vec3(
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        );
+        self.octree.set_voxel(voxel_pos, voxel_id);
+        self.octree_buffer_dirty = true;
+    }
 
-                self.total_chunk_updates = 0;
+    pub fn generate_sphere(&mut self, center: Vec3, radius: f32, voxel_id: u8) {
+        let center_i = vec3(
+            center.x.floor() as i32,
+            center.y.floor() as i32,
+            center.z.floor() as i32,
+        );
+
+        let r_i = radius.ceil() as i32;
+        let min = center_i - vec3(r_i, r_i, r_i);
+        let max = center_i + vec3(r_i, r_i, r_i);
+
+        self.octree.set_region(min, max, |x, y, z| {
+            let dx = (x - center_i.x) as f32;
+            let dy = (y - center_i.y) as f32;
+            let dz = (z - center_i.z) as f32;
+
+            if (dx * dx + dy * dy + dz * dz).sqrt() < radius {
+                voxel_id
+            } else {
+                0
             }
-        }
+        });
+
+        self.octree_buffer_dirty = true;
     }
 
-    fn needs_full_rebuild(&self) -> bool {
-        if let Some(octree) = &self.octree {
-            let (_min, _max, world_size) = self.voxel.get_world_bounds();
-            let max_dim = world_size[0].max(world_size[1]).max(world_size[2]);
-            let required_size = max_dim.next_power_of_two();
+    pub fn set_render_distance(&mut self, distance: i32) {
+        self.render_distance = distance;
+        self.chunk_manager.set_render_distance(distance);
+        println!("Render distance set to: {}", distance);
+    }
 
-            octree.size < required_size
-        } else {
-            true
-        }
+    pub fn get_stats(&self) -> String {
+        let octree_stats = self.octree.get_stats();
+        let chunk_stats = self.chunk_manager.get_stats();
+
+        format!(
+            "Nodes: {} | Mem: {:.1}MB | {} | Updates: {} | Dirty: {}",
+            octree_stats.total_nodes,
+            octree_stats.memory_usage() as f32 / (1024.0 * 1024.0),
+            chunk_stats,
+            octree_stats.total_updates,
+            self.octree.needs_gpu_upload()
+        )
+    }
+
+    pub fn debug_voxel_count(&self) -> (usize, usize) {
+        let stats = self.octree.get_stats();
+        (stats.filled_leaf_nodes, stats.leaf_nodes)
     }
 }

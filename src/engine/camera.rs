@@ -67,7 +67,7 @@ impl Camera {
         let right = self.get_right();
         let up = self.get_up();
 
-        let speed = 5.0;
+        let speed = 50.0;
         let move_dist = speed * delta;
 
         if input_manager.is_key_pressed(winit::event::VirtualKeyCode::W) {
