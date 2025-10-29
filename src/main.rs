@@ -8,8 +8,6 @@ use winit::event::KeyboardInput;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 
-use crate::engine::Camera;
-
 fn main() {
     // Just to make debug and release files work with debugger
     if let Ok(exe_path) = std::env::current_exe() {

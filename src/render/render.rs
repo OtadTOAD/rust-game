@@ -341,6 +341,7 @@ impl Render {
                 _dummy1: [0; 4],
                 cameraRight: [1.0, 0.0, 0.0],
                 fov: 70.0,
+                aspectRatio: 800.0 / 600.0,
             },
         )
         .unwrap();
@@ -602,6 +603,9 @@ impl Render {
             self.render_pass.clone(),
             &mut self.viewport,
         );
+
+        self.camera_buffer.write().unwrap().aspectRatio =
+            image_extent[0] as f32 / image_extent[1] as f32;
 
         self.swapchain = new_swapchain;
         self.framebuffers = new_framebuffers;

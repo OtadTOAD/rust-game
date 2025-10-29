@@ -1,7 +1,3 @@
-use winit::event::VirtualKeyCode;
-
-use crate::engine::{InputEvent, input::InputListener};
-
 pub struct Camera {
     pub position: [f32; 3],
     pub yaw: f32,
@@ -67,7 +63,7 @@ impl Camera {
 
     pub fn rotate(&mut self, delta_yaw: f32, delta_pitch: f32) {
         self.yaw += delta_yaw;
-        self.pitch += delta_pitch;
+        self.pitch -= delta_pitch;
 
         // Clamp pitch to avoid flipping
         let pitch_limit = std::f32::consts::FRAC_PI_2 - 0.01;
@@ -78,32 +74,5 @@ impl Camera {
         }
 
         self.is_changed = true;
-    }
-}
-
-impl InputListener for Camera {
-    fn on_input(&mut self, event: super::InputEvent) {
-        const MOVE_SPEED: f32 = 0.5;
-        const MOUSE_SENSITIVITY: f32 = 0.002;
-
-        match event {
-            InputEvent::KeyPressed(key) => match key {
-                VirtualKeyCode::W => self.move_forward(MOVE_SPEED),
-                VirtualKeyCode::S => self.move_backward(MOVE_SPEED),
-                VirtualKeyCode::A => self.move_left(MOVE_SPEED),
-                VirtualKeyCode::D => self.move_right(MOVE_SPEED),
-                VirtualKeyCode::Space => self.position[1] += MOVE_SPEED,
-                VirtualKeyCode::LShift => self.position[1] -= MOVE_SPEED,
-                _ => {}
-            },
-
-            InputEvent::MouseMoved(delta_x, delta_y) => {
-                self.rotate(
-                    delta_x as f32 * MOUSE_SENSITIVITY,
-                    -delta_y as f32 * MOUSE_SENSITIVITY, // Negative for natural mouse look
-                );
-            }
-            _ => {}
-        }
     }
 }

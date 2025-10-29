@@ -33,10 +33,7 @@ impl Engine {
                     _ => {}
                 },
                 InputEvent::MouseMoved(dx, dy) => {
-                    camera_ref.rotate(
-                        dx as f32 * MOUSE_SENSITIVITY,
-                        -dy as f32 * MOUSE_SENSITIVITY,
-                    );
+                    camera_ref.rotate(dx as f32 * MOUSE_SENSITIVITY, dy as f32 * MOUSE_SENSITIVITY);
                 }
                 _ => {}
             }

@@ -3,6 +3,7 @@ use winit::event::{ElementState, VirtualKeyCode};
 #[derive(Clone, Debug)]
 pub enum InputEvent {
     KeyPressed(VirtualKeyCode),
+    #[allow(dead_code)]
     KeyReleased(VirtualKeyCode),
     MouseMoved(f64, f64),
 }
@@ -18,10 +19,6 @@ impl InputEvent {
     pub fn from_mouse_motion(delta_x: f64, delta_y: f64) -> Self {
         InputEvent::MouseMoved(delta_x, delta_y)
     }
-}
-
-pub trait InputListener {
-    fn on_input(&mut self, event: InputEvent);
 }
 
 pub struct InputManager {
