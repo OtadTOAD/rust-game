@@ -1,114 +1,109 @@
-use nalgebra_glm::{TMat4, Vec3, identity, inverse, translate, vec3};
+use winit::event::VirtualKeyCode;
 
-use crate::engine::InputManager;
+use crate::engine::{InputEvent, input::InputListener};
 
 pub struct Camera {
-    pub view: TMat4<f32>,
-    pub camera_pos: Vec3,
-    pub requires_update: bool,
+    pub position: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub fov: f32,
+
+    pub is_changed: bool,
 }
 
 impl Camera {
-    pub fn update_view_matrix(&mut self) {
-        let mut rotation_only = identity::<f32, 4>();
-        for i in 0..3 {
-            for j in 0..3 {
-                rotation_only[(i, j)] = self.view[(i, j)];
+    pub fn new(pos: [f32; 3]) -> Self {
+        Camera {
+            position: pos,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov: 70.0_f32.to_radians(),
+
+            is_changed: true,
+        }
+    }
+
+    pub fn forward(&self) -> [f32; 3] {
+        [
+            self.yaw.cos() * self.pitch.cos(),
+            self.pitch.sin(),
+            self.yaw.sin() * self.pitch.cos(),
+        ]
+    }
+
+    pub fn right(&self) -> [f32; 3] {
+        [
+            (self.yaw + std::f32::consts::FRAC_PI_2).cos(),
+            0.0,
+            (self.yaw + std::f32::consts::FRAC_PI_2).sin(),
+        ]
+    }
+
+    pub fn move_forward(&mut self, distance: f32) {
+        let forward = self.forward();
+
+        self.position[0] += forward[0] * distance;
+        self.position[1] += forward[1] * distance;
+        self.position[2] += forward[2] * distance;
+
+        self.is_changed = true;
+    }
+
+    pub fn move_backward(&mut self, distance: f32) {
+        self.move_forward(-distance);
+    }
+
+    pub fn move_right(&mut self, distance: f32) {
+        let right = self.right();
+        self.position[0] += right[0] * distance;
+        self.position[2] += right[2] * distance;
+
+        self.is_changed = true;
+    }
+
+    pub fn move_left(&mut self, distance: f32) {
+        self.move_right(-distance);
+    }
+
+    pub fn rotate(&mut self, delta_yaw: f32, delta_pitch: f32) {
+        self.yaw += delta_yaw;
+        self.pitch += delta_pitch;
+
+        // Clamp pitch to avoid flipping
+        let pitch_limit = std::f32::consts::FRAC_PI_2 - 0.01;
+        if self.pitch > pitch_limit {
+            self.pitch = pitch_limit;
+        } else if self.pitch < -pitch_limit {
+            self.pitch = -pitch_limit;
+        }
+
+        self.is_changed = true;
+    }
+}
+
+impl InputListener for Camera {
+    fn on_input(&mut self, event: super::InputEvent) {
+        const MOVE_SPEED: f32 = 0.5;
+        const MOUSE_SENSITIVITY: f32 = 0.002;
+
+        match event {
+            InputEvent::KeyPressed(key) => match key {
+                VirtualKeyCode::W => self.move_forward(MOVE_SPEED),
+                VirtualKeyCode::S => self.move_backward(MOVE_SPEED),
+                VirtualKeyCode::A => self.move_left(MOVE_SPEED),
+                VirtualKeyCode::D => self.move_right(MOVE_SPEED),
+                VirtualKeyCode::Space => self.position[1] += MOVE_SPEED,
+                VirtualKeyCode::LShift => self.position[1] -= MOVE_SPEED,
+                _ => {}
+            },
+
+            InputEvent::MouseMoved(delta_x, delta_y) => {
+                self.rotate(
+                    delta_x as f32 * MOUSE_SENSITIVITY,
+                    -delta_y as f32 * MOUSE_SENSITIVITY, // Negative for natural mouse look
+                );
             }
-        }
-
-        let translation = translate(&identity(), &self.camera_pos);
-        self.view = rotation_only * inverse(&translation);
-    }
-
-    fn get_forward(&self) -> Vec3 {
-        vec3(-self.view[(2, 0)], -self.view[(2, 1)], -self.view[(2, 2)])
-    }
-
-    fn get_right(&self) -> Vec3 {
-        vec3(self.view[(0, 0)], self.view[(0, 1)], self.view[(0, 2)])
-    }
-
-    fn get_up(&self) -> Vec3 {
-        vec3(self.view[(1, 0)], self.view[(1, 1)], self.view[(1, 2)])
-    }
-
-    pub fn move_update(&mut self, input_manager: &InputManager, delta: f32) {
-        let mut moved = false;
-        let mut rotated = false;
-
-        let rot_speed = 1.5 * delta;
-        let world_up = vec3(0.0, 1.0, 0.0);
-
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::Left) {
-            let rotation = nalgebra_glm::rotate_normalized_axis(&identity(), rot_speed, &world_up);
-            self.view = rotation * self.view;
-            rotated = true;
-        }
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::Right) {
-            let rotation = nalgebra_glm::rotate_normalized_axis(&identity(), -rot_speed, &world_up);
-            self.view = rotation * self.view;
-            rotated = true;
-        }
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::Up) {
-            let right = self.get_right();
-            let rotation = nalgebra_glm::rotate_normalized_axis(&identity(), rot_speed, &right);
-            self.view = rotation * self.view;
-            rotated = true;
-        }
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::Down) {
-            let right = self.get_right();
-            let rotation = nalgebra_glm::rotate_normalized_axis(&identity(), -rot_speed, &right);
-            self.view = rotation * self.view;
-            rotated = true;
-        }
-
-        let forward = self.get_forward();
-        let right = self.get_right();
-        let up = self.get_up();
-
-        let speed = 50.0;
-        let move_dist = speed * delta;
-
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::W) {
-            self.camera_pos += forward * move_dist;
-            moved = true;
-        }
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::S) {
-            self.camera_pos -= forward * move_dist;
-            moved = true;
-        }
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::A) {
-            self.camera_pos -= right * move_dist;
-            moved = true;
-        }
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::D) {
-            self.camera_pos += right * move_dist;
-            moved = true;
-        }
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::E) {
-            self.camera_pos += up * move_dist;
-            moved = true;
-        }
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::Q) {
-            self.camera_pos -= up * move_dist;
-            moved = true;
-        }
-
-        // Legacy Space/Shift for world up/down
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::Space) {
-            self.camera_pos += vec3(0.0, 1.0, 0.0) * move_dist;
-            moved = true;
-        }
-        if input_manager.is_key_pressed(winit::event::VirtualKeyCode::LShift) {
-            self.camera_pos -= vec3(0.0, 1.0, 0.0) * move_dist;
-            moved = true;
-        }
-
-        if moved || rotated {
-            // Reconstruct view matrix with updated position and rotation
-            self.update_view_matrix();
-            self.requires_update = true;
+            _ => {}
         }
     }
 }

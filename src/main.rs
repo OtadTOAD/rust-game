@@ -1,24 +1,14 @@
 mod engine;
-mod system;
-
-use nalgebra_glm::vec3;
-use system::System;
+mod render;
 
 use vulkano::sync;
 use vulkano::sync::GpuFuture;
 
-use winit::event::ElementState;
 use winit::event::KeyboardInput;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::thread;
-
-use crate::engine::Engine;
-
-const ENGINE_TICK_RATE: f32 = 60.0;
+use crate::engine::Camera;
 
 fn main() {
     // Just to make debug and release files work with debugger
@@ -32,47 +22,14 @@ fn main() {
     }
 
     let event_loop = EventLoop::new();
-    let mut system = System::new(&event_loop);
+    let mut render = render::Render::new(&event_loop);
 
-    let engine = Arc::new(Mutex::new(Engine::with_sphere(
-        8,
-        vec3(0.0, 0.0, 0.0),
-        100.0,
-    )));
-
-    {
-        let mut e = engine.lock().unwrap();
-        e.init();
-
-        let (filled, total) = e.debug_voxel_count();
-        println!("\n=== Initial State ===");
-        println!("Filled voxels: {} / {}", filled, total);
-        println!("Stats: {}", e.get_stats());
-
-        if filled == 0 {
-            println!("WARNING: No voxels generated! World might be empty.");
-        }
-
-        system.init_octree_buffers(&e);
-    }
+    let mut engine = engine::Engine::new();
+    render.set_terrain(engine.terrain);
 
     let mut previous_frame_end =
-        Some(Box::new(sync::now(system.device.clone())) as Box<dyn GpuFuture>);
+        Some(Box::new(sync::now(render.device.clone())) as Box<dyn GpuFuture>);
 
-    let engine_for_tick = engine.clone();
-    thread::spawn(move || {
-        let timestep = 1.0 / ENGINE_TICK_RATE;
-        loop {
-            {
-                let mut e = engine_for_tick.lock().unwrap();
-                e.tick(timestep);
-            }
-
-            std::thread::sleep(std::time::Duration::from_secs_f32(timestep));
-        }
-    });
-
-    let engine_for_render = engine.clone();
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent { event, .. } => match event {
             WindowEvent::KeyboardInput {
@@ -84,39 +41,63 @@ fn main() {
                     },
                 ..
             } => {
-                let mut e = engine_for_render.lock().unwrap();
-                match state {
-                    ElementState::Pressed => e.input_manager.press_key(keycode),
-                    ElementState::Released => e.input_manager.release_key(keycode),
+                let input_event = engine::InputEvent::from_event_state(state, keycode);
+                engine.input.on_event(input_event);
+                //println!("Key event: {:?} {:?}", keycode, state);
+            }
+
+            WindowEvent::Focused(focused) => {
+                if focused {
+                    render
+                        .window()
+                        .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                        .unwrap();
                 }
             }
+
             WindowEvent::CloseRequested => {
                 *control_flow = ControlFlow::Exit;
             }
+
             WindowEvent::Resized(_) => {
-                system.recreate_swapchain();
+                render.recreate_swapchain();
             }
+
             _ => {}
         },
+
+        Event::DeviceEvent { event, .. } => match event {
+            winit::event::DeviceEvent::MouseMotion { delta } => {
+                let input_event = engine::InputEvent::from_mouse_motion(delta.0, delta.1);
+                engine.input.on_event(input_event);
+                //println!("Mouse moved: {:?} {:?}", delta.0, delta.1);
+            }
+
+            _ => {}
+        },
+
         Event::RedrawEventsCleared => {
+            render.window().request_redraw();
+        }
+
+        Event::RedrawRequested(_) => {
             previous_frame_end
                 .as_mut()
                 .take()
                 .unwrap()
                 .cleanup_finished();
 
-            let mut e = engine_for_render.lock().unwrap();
-
-            if e.camera.requires_update {
-                e.camera.requires_update = false;
-                system.set_view(&e.camera.view);
+            // Need to set scope this way so lock gets released before next frame
+            {
+                let mut engine_camera = engine.camera.lock().unwrap();
+                if engine_camera.is_changed {
+                    engine_camera.is_changed = !render.set_camera(&engine_camera);
+                }
             }
 
-            system.update_octree_buffers(&mut e);
-
-            system.start();
-            system.voxel();
-            system.finish(&mut previous_frame_end);
+            render.start();
+            render.voxel();
+            render.finish(&mut previous_frame_end);
         }
         _ => (),
     });
