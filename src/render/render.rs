@@ -403,7 +403,7 @@ impl Render {
         }
     }
 
-    pub fn set_terrain(&mut self, terrain: Terrain) {
+    pub fn set_terrain(&mut self, terrain: &Terrain) {
         let mut content = self.voxel_buffer.write().unwrap();
         for x in 0..16 {
             for y in 0..16 {

@@ -1,3 +1,7 @@
+use crate::engine::input::InputManager;
+
+const MOVE_SPEED: f32 = 5.0;
+
 pub struct Camera {
     pub position: [f32; 3],
     pub yaw: f32,
@@ -74,5 +78,28 @@ impl Camera {
         }
 
         self.is_changed = true;
+    }
+
+    pub fn tick(&mut self, input: &InputManager, delta_time: f64) {
+        if input.is_action_active(&super::input::Action::MoveForward) {
+            self.move_forward(MOVE_SPEED * delta_time as f32);
+        }
+        if input.is_action_active(&super::input::Action::MoveBackward) {
+            self.move_backward(MOVE_SPEED * delta_time as f32);
+        }
+        if input.is_action_active(&super::input::Action::MoveLeft) {
+            self.move_left(MOVE_SPEED * delta_time as f32);
+        }
+        if input.is_action_active(&super::input::Action::MoveRight) {
+            self.move_right(MOVE_SPEED * delta_time as f32);
+        }
+        if input.is_action_active(&super::input::Action::MoveUp) {
+            self.position[1] += MOVE_SPEED * delta_time as f32;
+            self.is_changed = true;
+        }
+        if input.is_action_active(&super::input::Action::MoveDown) {
+            self.position[1] -= MOVE_SPEED * delta_time as f32;
+            self.is_changed = true;
+        }
     }
 }

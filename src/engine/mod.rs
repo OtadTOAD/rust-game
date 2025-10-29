@@ -8,3 +8,4 @@ pub use engine::Engine;
 pub use terrain::Terrain;
 
 pub use input::InputEvent;
+pub use input::InputManager;
