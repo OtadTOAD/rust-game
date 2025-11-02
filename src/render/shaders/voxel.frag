@@ -1,14 +1,14 @@
 #version 450
 
+const int MAX_STEPS = 50;
+const int CHUNK_SIZE = 32;
+const int MAX_CHUNKS = 64;
+
 layout(location = 0) in vec2 fragPosition;
 
 layout(location = 0) out vec4 outColor;
 
-layout(set = 0, binding = 0) buffer VoxelBuffer {
-    uint voxels[];
-} voxels;
-
-layout(set = 0, binding = 1) uniform Camera {
+layout(set = 0, binding = 0) uniform Camera {
     vec3 cameraPos;
     vec3 cameraForward;
     vec3 cameraRight;
@@ -16,16 +16,53 @@ layout(set = 0, binding = 1) uniform Camera {
     float aspectRatio;
 } camera;
 
-uint getVoxel(ivec3 voxelCoord) {
-    if (voxelCoord.x < 0 || voxelCoord.y < 0 || voxelCoord.z < 0) {
-        return 0;
-    }
-    if (voxelCoord.x >= 16 || voxelCoord.y >= 16 || voxelCoord.z >= 16) {
-        return 0;
-    }
 
-    uint voxelIndex = uint(voxelCoord.z + voxelCoord.y * 16 + voxelCoord.x * 16 * 16);
-    return voxels.voxels[voxelIndex];
+layout(set = 0, binding = 1) buffer VoxelBuffer {
+    uint voxels[];
+} voxels;
+
+struct ChunkInfo {
+    ivec3 chunkPos;
+    uint dataOffset;
+};
+layout(set = 0, binding = 2) buffer ChunkBuffer {
+    uint chunkCount;
+    ChunkInfo chunks[MAX_CHUNKS];
+} chunks;
+
+ivec3 worldToChunk(ivec3 worldPos) {
+    return ivec3(floor(vec3(worldPos) / float(CHUNK_SIZE)));
+}
+
+ivec3 worldToLocal(ivec3 worldPos) {
+    ivec3 local = worldPos % CHUNK_SIZE;
+    if (local.x < 0) local.x += CHUNK_SIZE;
+    if (local.y < 0) local.y += CHUNK_SIZE;
+    if (local.z < 0) local.z += CHUNK_SIZE;
+    return local;
+}
+
+int findChunk(ivec3 chunkPos) {
+    for (int i = 0; i < int(chunks.chunkCount); i++) {
+        if (chunks.chunks[i].chunkPos == chunkPos) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+uint getVoxel(ivec3 worldPos) {
+    ivec3 chunkPos = worldToChunk(worldPos);
+    int chunkIndex = findChunk(chunkPos);
+    
+    if (chunkIndex == -1) {
+        return 0;
+    }
+    
+    ivec3 localPos = worldToLocal(worldPos);
+    uint voxelIndex = uint(localPos.z + localPos.y * CHUNK_SIZE + localPos.x * CHUNK_SIZE * CHUNK_SIZE);
+    uint dataOffset = chunks.chunks[chunkIndex].dataOffset;
+    return voxels.voxels[dataOffset + voxelIndex];
 }
 
 struct RayHit {
@@ -34,23 +71,6 @@ struct RayHit {
     vec3 normal;
     uint voxelValue;
 };
-
-const int MAX_STEPS = 200;
-
-// Ray-AABB intersection to find entry point into voxel grid(IDK ask claude)
-bool rayBoxIntersection(vec3 origin, vec3 rayDir, vec3 boxMin, vec3 boxMax, out float tNear, out float tFar) {
-    vec3 invDir = 1.0 / rayDir;
-    vec3 t0 = (boxMin - origin) * invDir;
-    vec3 t1 = (boxMax - origin) * invDir;
-    
-    vec3 tmin = min(t0, t1);
-    vec3 tmax = max(t0, t1);
-    
-    tNear = max(max(tmin.x, tmin.y), tmin.z);
-    tFar = min(min(tmax.x, tmax.y), tmax.z);
-    
-    return tNear <= tFar && tFar > 0.0;
-}
 
 RayHit raycastVoxel(vec3 origin, vec3 rayDir) {
     RayHit result;
@@ -63,56 +83,25 @@ RayHit raycastVoxel(vec3 origin, vec3 rayDir) {
         }
     }
 
-    // Find entry point into the grid
-    float tNear, tFar;
-    vec3 gridMin = vec3(0.0);
-    vec3 gridMax = vec3(16.0);
-    
-    if (!rayBoxIntersection(origin, safeDelta, gridMin, gridMax, tNear, tFar)) {
-        return result; // Ray doesn't hit the grid at all
-    }
-    
-    // Start from entry point (or origin if inside)
-    vec3 startPos = origin;
-    if (tNear > 0.0) {
-        startPos = origin + safeDelta * (tNear + 0.001); // Small epsilon to ensure we're inside
-    }
-
-    ivec3 voxelPos = ivec3(floor(startPos));
+    // Start from the camera position
+    ivec3 voxelPos = ivec3(floor(origin));
     ivec3 step = ivec3(sign(safeDelta));
     vec3 tDelta = abs(vec3(1.0) / safeDelta);
 
+    // Calculate initial tMax values
     vec3 tMax;
     for (int i = 0; i < 3; i++) {
         if (step[i] > 0) {
-            tMax[i] = (float(voxelPos[i] + 1) - startPos[i]) * tDelta[i];
+            tMax[i] = (float(voxelPos[i] + 1) - origin[i]) * tDelta[i];
         } else {
-            tMax[i] = (startPos[i] - float(voxelPos[i])) * tDelta[i];
+            tMax[i] = (origin[i] - float(voxelPos[i])) * tDelta[i];
         }
     }
 
-    // Initialize normal based on entry face
-    ivec3 normal = ivec3(0);
-    if (tNear > 0.0) {
-        // Ray entered from outside - determine which face
-        vec3 entryPoint = origin + safeDelta * tNear;
-        vec3 epsilon = vec3(0.001);
-        
-        if (abs(entryPoint.x - gridMin.x) < epsilon.x) normal = ivec3(-1, 0, 0);
-        else if (abs(entryPoint.x - gridMax.x) < epsilon.x) normal = ivec3(1, 0, 0);
-        else if (abs(entryPoint.y - gridMin.y) < epsilon.y) normal = ivec3(0, -1, 0);
-        else if (abs(entryPoint.y - gridMax.y) < epsilon.y) normal = ivec3(0, 1, 0);
-        else if (abs(entryPoint.z - gridMin.z) < epsilon.z) normal = ivec3(0, 0, -1);
-        else if (abs(entryPoint.z - gridMax.z) < epsilon.z) normal = ivec3(0, 0, 1);
-    }
+    ivec3 normal = ivec3(0, 1, 0); // Default normal
     
+    // DDA traversal through world space
     for (int i = 0; i < MAX_STEPS; i++) {
-        if (voxelPos.x < 0 || voxelPos.x >= 16 ||
-            voxelPos.y < 0 || voxelPos.y >= 16 ||
-            voxelPos.z < 0 || voxelPos.z >= 16) {
-            break;
-        }
-
         uint voxelValue = getVoxel(voxelPos);
         if (voxelValue != 0) {
             result.hit = true;
@@ -148,6 +137,23 @@ RayHit raycastVoxel(vec3 origin, vec3 rayDir) {
     return result;
 }
 
+vec3 chunkColor(ivec3 chunkPos) {
+    // Hash the chunk position to get a unique color
+    int hash = chunkPos.x * 73856093 ^ chunkPos.y * 19349663 ^ chunkPos.z * 83492791;
+    hash = abs(hash);
+    
+    float r = float((hash >> 0) & 255) / 255.0;
+    float g = float((hash >> 8) & 255) / 255.0;
+    float b = float((hash >> 16) & 255) / 255.0;
+    
+    // Normalize and add some brightness
+    vec3 color = vec3(r, g, b);
+    color = normalize(color) * 0.7 + 0.3;
+    
+    return color;
+}
+
+
 void main() {    
     vec3 up = cross(camera.cameraForward, camera.cameraRight);
     
@@ -159,9 +165,12 @@ void main() {
 
     RayHit hit = raycastVoxel(camera.cameraPos, rayDir);
     if (hit.hit) {
+        ivec3 chunkPos = worldToChunk(ivec3(hit.position));
+        vec3 chunkCol = chunkColor(chunkPos);
+
         vec3 lightDir = normalize(vec3(1.0, 2.0, 1.0));
         float diffuse = max(dot(hit.normal, lightDir) * 0.5 + 0.5, 0.0);
-        vec3 color = vec3(0.8, 0.8, 0.8) * (0.3 + 0.7 * diffuse);
+        vec3 color = chunkCol * (0.3 + 0.7 * diffuse);
         outColor = vec4(color, 1.0);
     } else {
         outColor = vec4(0.5, 0.7, 1.0, 1.0);

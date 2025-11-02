@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use nalgebra_glm::IVec3;
+
 use crate::engine::{Camera, InputEvent, input::InputManager, terrain::Terrain};
 
 pub struct Engine {
@@ -28,9 +30,15 @@ impl Engine {
             });
         }
 
-        Engine {
-            terrain: Terrain::new(),
+        let mut terrain = Terrain::new();
+        for x in -1..=1 {
+            for z in -1..=1 {
+                terrain.load_chunk(IVec3::new(x, 0, z));
+            }
+        }
 
+        Engine {
+            terrain,
             camera,
             input,
         }

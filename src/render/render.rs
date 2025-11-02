@@ -1,4 +1,4 @@
-use crate::engine::{Camera, Terrain};
+use crate::engine::{CHUNK_SIZE, Camera, MAX_CHUNKS, Terrain};
 use crate::render::dummy_vertex::DummyVertex;
 
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
@@ -91,6 +91,7 @@ pub struct Render {
 
     camera_buffer: Arc<CpuAccessibleBuffer<voxel_frag::ty::Camera>>,
 
+    chunk_buffer: Arc<CpuAccessibleBuffer<voxel_frag::ty::ChunkBuffer>>,
     voxel_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
 }
 
@@ -323,7 +324,28 @@ impl Render {
                 ..BufferUsage::empty()
             },
             false,
-            (0..(16 * 16 * 16)).map(|_| 0u32),
+            (0..(MAX_CHUNKS * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE)).map(|_| 0u32),
+        )
+        .unwrap();
+
+        let chunk_data = voxel_frag::ty::ChunkBuffer {
+            chunkCount: 0,
+            _dummy0: [0; 12], // Alignment padding
+            chunks: [voxel_frag::ty::ChunkInfo {
+                chunkPos: [0, 0, 0],
+                dataOffset: 0,
+            }; 64],
+        };
+        let chunk_buffer = CpuAccessibleBuffer::from_data(
+            &memory_allocator,
+            BufferUsage {
+                storage_buffer: true,
+                transfer_dst: true,
+                transfer_src: false,
+                ..BufferUsage::empty()
+            },
+            false,
+            chunk_data,
         )
         .unwrap();
 
@@ -372,6 +394,7 @@ impl Render {
             camera_buffer,
 
             voxel_buffer,
+            chunk_buffer,
         }
     }
 
@@ -404,12 +427,25 @@ impl Render {
     }
 
     pub fn set_terrain(&mut self, terrain: &Terrain) {
-        let mut content = self.voxel_buffer.write().unwrap();
-        for x in 0..16 {
-            for y in 0..16 {
-                for z in 0..16 {
-                    let index = z + y * 16 + x * 16 * 16;
-                    content[index] = terrain.voxels[x][y][z] as u32;
+        let mut voxel_content = self.voxel_buffer.write().unwrap();
+        let mut chunk_content = self.chunk_buffer.write().unwrap();
+        chunk_content.chunkCount = terrain.chunks.len() as u32;
+
+        for (i, (&chunk_pos, chunk_data)) in terrain.chunks.iter().enumerate() {
+            chunk_content.chunks[i] = voxel_frag::ty::ChunkInfo {
+                chunkPos: [chunk_pos.x, chunk_pos.y, chunk_pos.z],
+                dataOffset: (i * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as u32,
+            };
+
+            for x in 0..CHUNK_SIZE {
+                for y in 0..CHUNK_SIZE {
+                    for z in 0..CHUNK_SIZE {
+                        let index = z
+                            + y * CHUNK_SIZE
+                            + x * CHUNK_SIZE * CHUNK_SIZE
+                            + i * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+                        voxel_content[index] = chunk_data.voxels[x][y][z] as u32;
+                    }
                 }
             }
         }
@@ -436,8 +472,9 @@ impl Render {
             &self.descriptor_set_allocator,
             voxel_layout.clone(),
             [
-                WriteDescriptorSet::buffer(0, self.voxel_buffer.clone()),
-                WriteDescriptorSet::buffer(1, self.camera_buffer.clone()),
+                WriteDescriptorSet::buffer(0, self.camera_buffer.clone()),
+                WriteDescriptorSet::buffer(1, self.voxel_buffer.clone()),
+                WriteDescriptorSet::buffer(2, self.chunk_buffer.clone()),
             ],
         )
         .unwrap();

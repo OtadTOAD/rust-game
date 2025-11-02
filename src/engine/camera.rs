@@ -1,6 +1,6 @@
 use crate::engine::input::InputManager;
 
-const MOVE_SPEED: f32 = 5.0;
+const MOVE_SPEED: f32 = 25.0;
 
 pub struct Camera {
     pub position: [f32; 3],
