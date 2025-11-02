@@ -5,9 +5,9 @@ use nalgebra_glm::IVec3;
 use crate::engine::{Camera, InputEvent, input::InputManager, terrain::Terrain};
 
 pub struct Engine {
-    pub terrain: Terrain,
-    pub camera: Arc<Mutex<Camera>>,
     pub input: Arc<Mutex<InputManager>>,
+    pub camera: Arc<Mutex<Camera>>,
+    pub terrain: Terrain,
 }
 
 impl Engine {
@@ -44,7 +44,7 @@ impl Engine {
         }
     }
 
-    pub fn tick(&mut self, delta_time: f64) {
+    pub fn tick(&self, delta_time: f64) {
         let mut camera = self.camera.lock().unwrap();
         let input = self.input.lock().unwrap();
 

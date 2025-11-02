@@ -1,3 +1,5 @@
+use nalgebra_glm::Mat3x2;
+
 use crate::engine::input::InputManager;
 
 const MOVE_SPEED: f32 = 25.0;
@@ -80,7 +82,7 @@ impl Camera {
         self.is_changed = true;
     }
 
-    pub fn tick(&mut self, input: &InputManager, delta_time: f64) {
+    pub fn tick(&mut self, input: &InputManager, delta_time: f64) -> Mat3x2 {
         if input.is_action_active(&super::input::Action::MoveForward) {
             self.move_forward(MOVE_SPEED * delta_time as f32);
         }
@@ -101,5 +103,14 @@ impl Camera {
             self.position[1] -= MOVE_SPEED * delta_time as f32;
             self.is_changed = true;
         }
+
+        Mat3x2::new(
+            self.position[0],
+            self.position[1],
+            self.position[2],
+            self.yaw,
+            self.pitch,
+            self.fov,
+        )
     }
 }

@@ -93,6 +93,7 @@ pub struct Render {
 
     chunk_buffer: Arc<CpuAccessibleBuffer<voxel_frag::ty::ChunkBuffer>>,
     voxel_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
+    voxel_set: Arc<PersistentDescriptorSet>,
 }
 
 impl Render {
@@ -368,6 +369,18 @@ impl Render {
         )
         .unwrap();
 
+        let voxel_layout = voxel_pipeline.layout().set_layouts().get(0).unwrap();
+        let voxel_set = PersistentDescriptorSet::new(
+            &descriptor_set_allocator,
+            voxel_layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, camera_buffer.clone()),
+                WriteDescriptorSet::buffer(1, voxel_buffer.clone()),
+                WriteDescriptorSet::buffer(2, chunk_buffer.clone()),
+            ],
+        )
+        .unwrap();
+
         let render_stage = RenderStage::Stopped;
         let commands = None;
         let image_index = 0;
@@ -395,6 +408,7 @@ impl Render {
 
             voxel_buffer,
             chunk_buffer,
+            voxel_set,
         }
     }
 
@@ -426,7 +440,7 @@ impl Render {
         }
     }
 
-    pub fn set_terrain(&mut self, terrain: &Terrain) {
+    pub fn update_terrain(&mut self, terrain: &Terrain) {
         let mut voxel_content = self.voxel_buffer.write().unwrap();
         let mut chunk_content = self.chunk_buffer.write().unwrap();
         chunk_content.chunkCount = terrain.chunks.len() as u32;
@@ -449,6 +463,19 @@ impl Render {
                 }
             }
         }
+
+        let voxel_layout = self.voxel_pipeline.layout().set_layouts().get(0).unwrap();
+        let voxel_set = PersistentDescriptorSet::new(
+            &self.descriptor_set_allocator,
+            voxel_layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, self.camera_buffer.clone()),
+                WriteDescriptorSet::buffer(1, self.voxel_buffer.clone()),
+                WriteDescriptorSet::buffer(2, self.chunk_buffer.clone()),
+            ],
+        )
+        .unwrap();
+        self.voxel_set = voxel_set;
     }
 
     pub fn voxel(&mut self) {
@@ -467,18 +494,6 @@ impl Render {
             }
         }
 
-        let voxel_layout = self.voxel_pipeline.layout().set_layouts().get(0).unwrap();
-        let voxel_set = PersistentDescriptorSet::new(
-            &self.descriptor_set_allocator,
-            voxel_layout.clone(),
-            [
-                WriteDescriptorSet::buffer(0, self.camera_buffer.clone()),
-                WriteDescriptorSet::buffer(1, self.voxel_buffer.clone()),
-                WriteDescriptorSet::buffer(2, self.chunk_buffer.clone()),
-            ],
-        )
-        .unwrap();
-
         self.commands
             .as_mut()
             .unwrap()
@@ -488,7 +503,7 @@ impl Render {
                 PipelineBindPoint::Graphics,
                 self.voxel_pipeline.layout().clone(),
                 0,
-                voxel_set.clone(),
+                self.voxel_set.clone(),
             )
             .bind_vertex_buffers(0, self.dummy_verts.clone())
             .draw(self.dummy_verts.len() as u32, 1, 0, 0)
