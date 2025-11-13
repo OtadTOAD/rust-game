@@ -1,4 +1,4 @@
-use crate::engine::{CHUNK_SIZE, Camera, MAX_CHUNKS, Terrain};
+use crate::engine::Camera;
 use crate::render::dummy_vertex::DummyVertex;
 
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
@@ -73,6 +73,8 @@ enum RenderStage {
 
 pub struct Render {
     pub device: Arc<Device>,
+    pub aspect_ratio: f32,
+
     surface: Arc<Surface>,
     queue: Arc<Queue>,
     swapchain: Arc<Swapchain>,
@@ -90,10 +92,6 @@ pub struct Render {
     descriptor_set_allocator: StandardDescriptorSetAllocator,
 
     camera_buffer: Arc<CpuAccessibleBuffer<voxel_frag::ty::Camera>>,
-
-    chunk_buffer: Arc<CpuAccessibleBuffer<voxel_frag::ty::ChunkBuffer>>,
-    voxel_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
-    voxel_set: Arc<PersistentDescriptorSet>,
 }
 
 impl Render {
@@ -316,40 +314,6 @@ impl Render {
             &mut viewport,
         );
 
-        let voxel_buffer = CpuAccessibleBuffer::from_iter(
-            &memory_allocator,
-            BufferUsage {
-                storage_buffer: true,
-                transfer_dst: true,
-                transfer_src: false,
-                ..BufferUsage::empty()
-            },
-            false,
-            (0..(MAX_CHUNKS * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE)).map(|_| 0u32),
-        )
-        .unwrap();
-
-        let chunk_data = voxel_frag::ty::ChunkBuffer {
-            chunkCount: 0,
-            _dummy0: [0; 12], // Alignment padding
-            chunks: [voxel_frag::ty::ChunkInfo {
-                chunkPos: [0, 0, 0],
-                dataOffset: 0,
-            }; 64],
-        };
-        let chunk_buffer = CpuAccessibleBuffer::from_data(
-            &memory_allocator,
-            BufferUsage {
-                storage_buffer: true,
-                transfer_dst: true,
-                transfer_src: false,
-                ..BufferUsage::empty()
-            },
-            false,
-            chunk_data,
-        )
-        .unwrap();
-
         let camera_buffer = CpuAccessibleBuffer::from_data(
             &memory_allocator,
             BufferUsage {
@@ -358,26 +322,10 @@ impl Render {
             },
             false,
             voxel_frag::ty::Camera {
-                cameraPos: [0.0, 10.0, 0.0],
-                _dummy0: [0; 4],
-                cameraForward: [0.0, -5.0, -0.5],
-                _dummy1: [0; 4],
-                cameraRight: [1.0, 0.0, 0.0],
-                fov: 70.0,
-                aspectRatio: 800.0 / 600.0,
+                invProj: [[0.0; 4]; 4],
+                invView: [[0.0; 4]; 4],
+                camPos: [0.0; 3],
             },
-        )
-        .unwrap();
-
-        let voxel_layout = voxel_pipeline.layout().set_layouts().get(0).unwrap();
-        let voxel_set = PersistentDescriptorSet::new(
-            &descriptor_set_allocator,
-            voxel_layout.clone(),
-            [
-                WriteDescriptorSet::buffer(0, camera_buffer.clone()),
-                WriteDescriptorSet::buffer(1, voxel_buffer.clone()),
-                WriteDescriptorSet::buffer(2, chunk_buffer.clone()),
-            ],
         )
         .unwrap();
 
@@ -385,6 +333,11 @@ impl Render {
         let commands = None;
         let image_index = 0;
         let acquire_future = None;
+
+        let aspect_ratio = {
+            let window = surface.object().unwrap().downcast_ref::<Window>().unwrap();
+            window.inner_size().width as f32 / window.inner_size().height as f32
+        };
 
         Render {
             surface,
@@ -405,10 +358,7 @@ impl Render {
             acquire_future,
 
             camera_buffer,
-
-            voxel_buffer,
-            chunk_buffer,
-            voxel_set,
+            aspect_ratio,
         }
     }
 
@@ -423,59 +373,15 @@ impl Render {
     pub fn set_camera(&mut self, camera: &Camera) -> bool {
         match self.camera_buffer.write() {
             Ok(mut content) => {
-                let window = self.window();
-
-                let forward = camera.forward();
-                let right = camera.right();
-                content.cameraPos = camera.position;
-                content.cameraForward = forward;
-                content.cameraRight = right;
-                content.fov = camera.fov;
-                content.aspectRatio =
-                    window.inner_size().width as f32 / window.inner_size().height as f32;
+                let (inv_proj, inv_view) = camera.get_matrices();
+                content.camPos = camera.position;
+                content.invProj = *inv_proj;
+                content.invView = *inv_view;
 
                 return true;
             }
             Err(_) => return false,
         }
-    }
-
-    pub fn update_terrain(&mut self, terrain: &Terrain) {
-        let mut voxel_content = self.voxel_buffer.write().unwrap();
-        let mut chunk_content = self.chunk_buffer.write().unwrap();
-        chunk_content.chunkCount = terrain.chunks.len() as u32;
-
-        for (i, (&chunk_pos, chunk_data)) in terrain.chunks.iter().enumerate() {
-            chunk_content.chunks[i] = voxel_frag::ty::ChunkInfo {
-                chunkPos: [chunk_pos.x, chunk_pos.y, chunk_pos.z],
-                dataOffset: (i * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as u32,
-            };
-
-            for x in 0..CHUNK_SIZE {
-                for y in 0..CHUNK_SIZE {
-                    for z in 0..CHUNK_SIZE {
-                        let index = z
-                            + y * CHUNK_SIZE
-                            + x * CHUNK_SIZE * CHUNK_SIZE
-                            + i * CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
-                        voxel_content[index] = chunk_data.voxels[x][y][z] as u32;
-                    }
-                }
-            }
-        }
-
-        let voxel_layout = self.voxel_pipeline.layout().set_layouts().get(0).unwrap();
-        let voxel_set = PersistentDescriptorSet::new(
-            &self.descriptor_set_allocator,
-            voxel_layout.clone(),
-            [
-                WriteDescriptorSet::buffer(0, self.camera_buffer.clone()),
-                WriteDescriptorSet::buffer(1, self.voxel_buffer.clone()),
-                WriteDescriptorSet::buffer(2, self.chunk_buffer.clone()),
-            ],
-        )
-        .unwrap();
-        self.voxel_set = voxel_set;
     }
 
     pub fn voxel(&mut self) {
@@ -494,6 +400,14 @@ impl Render {
             }
         }
 
+        let voxel_layout = self.voxel_pipeline.layout().set_layouts().get(0).unwrap();
+        let voxel_set = PersistentDescriptorSet::new(
+            &self.descriptor_set_allocator,
+            voxel_layout.clone(),
+            [WriteDescriptorSet::buffer(0, self.camera_buffer.clone())],
+        )
+        .unwrap();
+
         self.commands
             .as_mut()
             .unwrap()
@@ -503,7 +417,7 @@ impl Render {
                 PipelineBindPoint::Graphics,
                 self.voxel_pipeline.layout().clone(),
                 0,
-                self.voxel_set.clone(),
+                voxel_set.clone(),
             )
             .bind_vertex_buffers(0, self.dummy_verts.clone())
             .draw(self.dummy_verts.len() as u32, 1, 0, 0)
@@ -660,9 +574,12 @@ impl Render {
             &mut self.viewport,
         );
 
+        let aspect_ratio = window.inner_size().width as f32 / window.inner_size().height as f32;
+
         self.swapchain = new_swapchain;
         self.framebuffers = new_framebuffers;
         self.render_stage = RenderStage::Stopped;
+        self.aspect_ratio = aspect_ratio;
     }
 
     fn window_size_dependent_setup(

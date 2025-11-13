@@ -5,7 +5,6 @@ use winit::event::{ElementState, VirtualKeyCode};
 #[derive(Clone, Debug)]
 pub enum InputEvent {
     KeyPressed(VirtualKeyCode),
-    #[allow(dead_code)]
     KeyReleased(VirtualKeyCode),
     MouseMoved(f64, f64),
 }
@@ -18,6 +17,7 @@ pub enum Action {
     MoveRight,
     MoveUp,
     MoveDown,
+    ShutDown,
 }
 
 impl Action {
@@ -29,6 +29,8 @@ impl Action {
             VirtualKeyCode::D => Some(Action::MoveRight),
             VirtualKeyCode::Space => Some(Action::MoveUp),
             VirtualKeyCode::LShift => Some(Action::MoveDown),
+            VirtualKeyCode::Escape => Some(Action::ShutDown),
+
             _ => None,
         }
     }
@@ -48,27 +50,24 @@ impl InputEvent {
 }
 
 pub struct InputManager {
-    listeners: Vec<Box<dyn FnMut(InputEvent) + Send>>,
     actions: HashSet<Action>,
+    mouse_delta: (f64, f64),
 }
 
 impl InputManager {
     pub fn new() -> Self {
         InputManager {
-            listeners: Vec::new(),
             actions: HashSet::new(),
+            mouse_delta: (0.0, 0.0),
         }
-    }
-
-    pub fn add_listener<F>(&mut self, listener: F)
-    where
-        F: FnMut(InputEvent) + 'static + Send,
-    {
-        self.listeners.push(Box::new(listener));
     }
 
     pub fn is_action_active(&self, action: &Action) -> bool {
         self.actions.contains(action)
+    }
+
+    pub fn get_mouse_delta(&self) -> (f64, f64) {
+        self.mouse_delta
     }
 
     pub fn on_event(&mut self, event: InputEvent) {
@@ -85,11 +84,9 @@ impl InputManager {
                 }
             }
 
-            _ => {}
-        }
-
-        for listener in &mut self.listeners {
-            listener(event.clone());
+            InputEvent::MouseMoved(delta_x, delta_y) => {
+                self.mouse_delta = (delta_x, delta_y);
+            }
         }
     }
 }
