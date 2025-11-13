@@ -126,7 +126,7 @@ fn main() {
                 }
 
                 render.start();
-                render.voxel();
+                render.render();
                 render.finish(&mut previous_frame_end);
             }
             _ => (),

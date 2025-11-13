@@ -67,7 +67,7 @@ mod voxel_frag {
 #[derive(Debug, Clone)]
 enum RenderStage {
     Stopped,
-    Voxel,
+    Render,
     NeedsRedraw,
 }
 
@@ -384,9 +384,9 @@ impl Render {
         }
     }
 
-    pub fn voxel(&mut self) {
+    pub fn render(&mut self) {
         match self.render_stage {
-            RenderStage::Voxel => {}
+            RenderStage::Render => {} // Continue
             RenderStage::NeedsRedraw => {
                 self.recreate_swapchain();
                 self.render_stage = RenderStage::Stopped;
@@ -426,7 +426,7 @@ impl Render {
 
     pub fn finish(&mut self, previous_frame_end: &mut Option<Box<dyn GpuFuture>>) {
         match self.render_stage {
-            RenderStage::Voxel => {}
+            RenderStage::Render => {}
             RenderStage::NeedsRedraw => {
                 self.recreate_swapchain();
                 self.commands = None;
@@ -487,7 +487,7 @@ impl Render {
     pub fn start(&mut self) {
         match self.render_stage {
             RenderStage::Stopped => {
-                self.render_stage = RenderStage::Voxel;
+                self.render_stage = RenderStage::Render;
             }
             RenderStage::NeedsRedraw => {
                 self.recreate_swapchain();
