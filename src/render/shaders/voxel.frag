@@ -1,20 +1,155 @@
 #version 450
 
-layout(location = 0) in vec2 uv;
+layout(location = 0) in vec3 in_world_pos;
+layout(location = 1) in mat4 in_instance_inv_model;
 
-layout(location = 0) out vec4 outColor;
+layout(location = 0) out vec4 out_color;
+layout(location = 1) out vec4 out_albedo;
+layout(location = 2) out vec4 out_normal;
 
 layout(set = 0, binding = 0) uniform Camera {
-    mat4 invProj;
-    mat4 invView;
-    vec3 camPos;
+    mat4 view;
+    mat4 proj;
+    vec3 pos;
 } cam;
 
-void main() {
-    vec3 ro = cam.camPos;
-    vec3 rd = (cam.invProj * vec4(uv*2.-1., 0, 1)).xyz;
-    rd = (cam.invView * vec4(rd, 0)).xyz;
-    rd = normalize(rd);
+layout(set = 1, binding = 0) uniform usampler3D voxel_texture;
 
-    outColor = vec4(rd*0.5 + 0.5, 1.0);
+// To keep this simple AABB, we assume ro and rd are in local space.
+// Ray gets transformed into local space before calling this.
+const float EPS = 1e-8;
+bool intersectAABB(vec3 ro, vec3 rd, vec3 min_b, vec3 max_b, out float t0, out float t1) {
+    vec3 inv_dir = vec3(
+        abs(rd.x) > EPS ? 1.0 / rd.x : 1e30,
+        abs(rd.y) > EPS ? 1.0 / rd.y : 1e30,
+        abs(rd.z) > EPS ? 1.0 / rd.z : 1e30
+    );
+
+    vec3 t0s = (min_b - ro) * inv_dir;
+    vec3 t1s = (max_b - ro) * inv_dir;
+
+    vec3 tminv = min(t0s, t1s);
+    vec3 tmaxv = max(t0s, t1s);
+
+    t0 = max(max(tminv.x, tminv.y), tminv.z);
+    t1 = min(min(tmaxv.x, tmaxv.y), tmaxv.z);
+    return t1 >= max(t0, 0.0);
+}
+
+// https://www.cs.yorku.ca/~amana/research/grid.pdf
+bool voxelDDA(vec3 ro, vec3 rd, vec3 min_b, vec3 max_b, ivec3 grid_size, out ivec3 hit_voxel, out float t_hit, out vec3 normal) {
+    float t_in, t_out;
+    if (!intersectAABB(ro, rd, min_b, max_b, t_in, t_out)) {
+        return false;
+    }
+
+    t_in = max(t_in, 0.0);
+    vec3 pos = ro + rd * t_in;
+    vec3 pos_in_grid = pos;
+    ivec3 voxel = ivec3(floor(pos_in_grid));
+    voxel = clamp(voxel, ivec3(0), grid_size - ivec3(1));
+
+    ivec3 step;
+    vec3 t_max;
+    vec3 t_delta;
+    for (int i = 0; i < 3; i++) {
+        if (rd[i] > 0.0) {
+            step[i] = 1;
+            t_max[i] = t_in + ((float(voxel[i]) + 1.0) - pos_in_grid[i]) / rd[i];
+            t_delta[i] = 1.0 / rd[i];
+        } else if (rd[i] < 0.0) {
+            step[i] = -1;
+            t_max[i] = t_in + (float(voxel[i]) - pos_in_grid[i]) / rd[i];
+            t_delta[i] = -1.0 / rd[i];
+        } else {
+            step[i] = 0;
+            t_max[i] = 1e30;
+            t_delta[i] = 1e30;
+        }
+    }
+
+    float t = t_in;
+    vec3 hit_normal = vec3(0.0);
+    
+    while (t <= t_out) {
+        
+        if (voxel.x < 0 || voxel.y < 0 || voxel.z < 0 ||
+            voxel.x >= grid_size.x || voxel.y >= grid_size.y || voxel.z >= grid_size.z) {
+            break;
+        }
+        
+        uint v = texelFetch(voxel_texture, voxel, 0).r;
+        if (v != 0u) {
+            hit_voxel = voxel;
+            t_hit = t;
+            normal = hit_normal;
+            return true;
+        }
+
+        if (t_max.x < t_max.y) {
+            if (t_max.x < t_max.z) {
+                voxel.x += step.x;
+                t = t_max.x;
+                t_max.x += t_delta.x;
+                hit_normal = vec3(-step.x, 0.0, 0.0);
+            } else {
+                voxel.z += step.z;
+                t = t_max.z;
+                t_max.z += t_delta.z;
+                hit_normal = vec3(0.0, 0.0, -step.z);
+            }
+        } else {
+            if (t_max.y < t_max.z) {
+                voxel.y += step.y;
+                t = t_max.y;
+                t_max.y += t_delta.y;
+                hit_normal = vec3(0.0, -step.y, 0.0);
+            } else {
+                voxel.z += step.z;
+                t = t_max.z;
+                t_max.z += t_delta.z;
+                hit_normal = vec3(0.0, 0.0, -step.z);
+            }
+        }
+    }
+    return false;
+}
+
+void main() {
+    vec3 rd_world = normalize(in_world_pos - cam.pos);
+
+    ivec3 grid_size = textureSize(voxel_texture, 0);
+
+    vec3 ro_unit = vec3(in_instance_inv_model * vec4(cam.pos, 1.0));
+    vec3 ro_local = (ro_unit + vec3(0.5)) * vec3(grid_size);
+    
+    vec3 in_pos_unit = vec3(in_instance_inv_model * vec4(in_world_pos, 1.0));
+    vec3 in_pos_local = (in_pos_unit + vec3(0.5)) * vec3(grid_size);
+    vec3 rd_local = normalize(in_pos_local - ro_local);
+
+    vec3 box_min = vec3(0.0);
+    vec3 box_max = vec3(grid_size);
+    
+    ivec3 hit;
+    float t_hit;
+    vec3 normal_local;
+    if (!voxelDDA(ro_local, rd_local, box_min, box_max, grid_size, hit, t_hit, normal_local)) {
+        discard;
+    }
+
+    vec3 normal_world = normalize(mat3(transpose(in_instance_inv_model)) * normal_local);
+
+    // TODO: Use voxel idx to look up material in pallette
+    vec3 albedo = vec3(1.0, 0.0, 0.0);
+    
+    // Basic directional lighting for testing
+    vec3 light_dir = normalize(vec3(0.5, -0.5, 0.5));
+    float diffuse = max(dot(normal_world, light_dir), 0.0);
+    float ambient = 0.2;
+    float lighting = ambient + diffuse * (1.0 - ambient);
+    
+    // G-buffer
+    out_albedo = vec4(albedo, 1.0);
+    out_normal = vec4(normal_world * 0.5 + 0.5, 1.0); 
+    out_color = vec4(albedo * lighting, 1.0);
 }

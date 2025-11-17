@@ -32,16 +32,35 @@ fn main() {
 
     // Engine setup
     let input_manager = Arc::new(Mutex::new(InputManager::new()));
-    let camera = Arc::new(Mutex::new(Camera::new([0.0, 10.0, 0.0])));
+    let camera = Arc::new(Mutex::new(Camera::new(
+        [0.0, 0.0, 24.0].into(),
+        70.0,
+        render.aspect_ratio,
+    )));
     let engine = Arc::new(RwLock::new(Engine::new(
         input_manager.clone(),
         camera.clone(),
     )));
+    let engine_physics = engine.clone();
+    let engine_render = engine.clone();
 
     // Initialize start state
     {
-        let e = engine.read().unwrap();
+        let mut e = engine_physics.write().unwrap();
+        let mut c = camera.lock().unwrap();
         e.init();
+        c.update_matrices();
+        render.set_camera(&c);
+    }
+
+    // Upload voxel textures
+    {
+        let mut previous_frame_end =
+            Some(Box::new(sync::now(render.device.clone())) as Box<dyn GpuFuture>);
+        let e = engine.read().unwrap();
+        for model in e.models.iter() {
+            render.upload_voxel_texture(model, &mut previous_frame_end);
+        }
     }
 
     // Physics thread
@@ -49,7 +68,7 @@ fn main() {
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(PHYSICS_STEP_MS));
-                let e = engine.write().unwrap();
+                let e = engine_physics.write().unwrap();
                 e.tick(PHYSICS_STEP_SEC);
             }
         });
@@ -99,7 +118,6 @@ fn main() {
                 winit::event::DeviceEvent::MouseMotion { delta } => {
                     let input_event = engine::InputEvent::from_mouse_motion(delta.0, delta.1);
                     input_manager.lock().unwrap().on_event(input_event);
-                    //println!("Mouse moved: {:?} {:?}", delta.0, delta.1);
                 }
 
                 _ => {}
@@ -119,14 +137,22 @@ fn main() {
                 // Need to set scope this way so lock gets released before next frame
                 {
                     let mut engine_camera = camera.lock().unwrap();
-                    if engine_camera.is_changed {
-                        engine_camera.update_matrices(render.aspect_ratio);
-                        engine_camera.is_changed = !render.set_camera(&engine_camera);
+                    if engine_camera.is_changed || engine_camera.aspect_ratio != render.aspect_ratio
+                    {
+                        engine_camera.aspect_ratio = render.aspect_ratio;
+                        engine_camera.update_matrices();
+                        render.set_camera(&engine_camera);
+                        engine_camera.is_changed = false;
                     }
                 }
 
                 render.start();
-                render.render();
+
+                let e = engine_render.read().unwrap();
+                for model in e.models.iter() {
+                    render.render(model);
+                }
+
                 render.finish(&mut previous_frame_end);
             }
             _ => (),

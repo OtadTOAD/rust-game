@@ -1,6 +1,7 @@
-use crate::engine::Camera;
-use crate::render::dummy_vertex::DummyVertex;
+use crate::engine::{Camera, DrawModel, Model};
+use crate::render::dummy_vertex::{BoxVertex, DummyVertex};
 
+use nalgebra_glm::identity;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
@@ -13,7 +14,9 @@ use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
-use vulkano::image::{AttachmentImage, ImageAccess, SwapchainImage};
+use vulkano::image::{
+    AttachmentImage, ImageAccess, ImageDimensions, ImmutableImage, MipmapsCount, SwapchainImage,
+};
 use vulkano::instance::debug::{
     DebugUtilsMessageSeverity, DebugUtilsMessageType, DebugUtilsMessenger,
     DebugUtilsMessengerCreateInfo,
@@ -28,6 +31,7 @@ use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
+use vulkano::sampler::{Filter, Sampler, SamplerCreateInfo};
 use vulkano::swapchain::{
     self, AcquireError, PresentMode, Surface, Swapchain, SwapchainAcquireFuture,
     SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo,
@@ -44,11 +48,18 @@ use std::mem;
 use std::sync::Arc;
 
 vulkano::impl_vertex!(DummyVertex, position);
+vulkano::impl_vertex!(BoxVertex, in_position);
+vulkano::impl_vertex!(DrawModel, in_instance_model, in_instance_inv_model);
 
 mod voxel_vert {
     vulkano_shaders::shader! {
         ty: "vertex",
         path: "src/render/shaders/voxel.vert",
+        types_meta: {
+            use bytemuck::{Pod, Zeroable};
+
+            #[derive(Clone, Copy, Zeroable, Pod)]
+        },
     }
 }
 
@@ -83,15 +94,24 @@ pub struct Render {
     render_pass: Arc<RenderPass>,
     voxel_pipeline: Arc<GraphicsPipeline>,
     dummy_verts: Arc<CpuAccessibleBuffer<[DummyVertex]>>,
+    bounding_box_verts: Arc<CpuAccessibleBuffer<[BoxVertex]>>,
     viewport: Viewport,
-    framebuffers: Vec<Arc<Framebuffer>>,
     render_stage: RenderStage,
     commands: Option<AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>>,
     image_index: u32,
     acquire_future: Option<SwapchainAcquireFuture>,
     descriptor_set_allocator: StandardDescriptorSetAllocator,
 
-    camera_buffer: Arc<CpuAccessibleBuffer<voxel_frag::ty::Camera>>,
+    framebuffers: Vec<Arc<Framebuffer>>,
+    albedo_buffer: Arc<ImageView<AttachmentImage>>,
+    normal_buffer: Arc<ImageView<AttachmentImage>>,
+
+    camera_buffer: Arc<CpuAccessibleBuffer<voxel_vert::ty::Camera>>,
+    camera_set: Arc<PersistentDescriptorSet>,
+
+    voxel_texture: Option<Arc<ImageView<ImmutableImage>>>,
+    voxel_sampler: Arc<Sampler>,
+    voxel_set: Option<Arc<PersistentDescriptorSet>>,
 }
 
 impl Render {
@@ -264,11 +284,23 @@ impl Render {
                     store: DontCare,
                     format: Format::D16_UNORM,
                     samples: 1,
+                },
+                albedo: {
+                    load: Clear,
+                    store: DontCare,
+                    format: Format::R8G8B8A8_SRGB,
+                    samples: 1,
+                },
+                normal: {
+                    load: Clear,
+                    store: DontCare,
+                    format: Format::R16G16B16A16_SFLOAT,
+                    samples: 1,
                 }
             },
             passes: [
                 {
-                    color: [final_color],
+                    color: [final_color, albedo, normal],
                     depth_stencil: {depth},
                     input: []
                 }
@@ -279,12 +311,16 @@ impl Render {
         let voxel_pass = Subpass::from(render_pass.clone(), 0).unwrap();
 
         let voxel_pipeline = GraphicsPipeline::start()
-            .vertex_input_state(BuffersDefinition::new().vertex::<DummyVertex>())
+            .vertex_input_state(
+                BuffersDefinition::new()
+                    .vertex::<BoxVertex>()
+                    .instance::<DrawModel>(),
+            )
             .vertex_shader(deferred_vert.entry_point("main").unwrap(), ())
             .input_assembly_state(InputAssemblyState::new())
             .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
             .fragment_shader(deferred_frag.entry_point("main").unwrap(), ())
-            .depth_stencil_state(DepthStencilState::disabled())
+            .depth_stencil_state(DepthStencilState::simple_depth_test())
             .rasterization_state(RasterizationState::new().cull_mode(CullMode::None))
             .render_pass(voxel_pass.clone())
             .build(device.clone())
@@ -301,13 +337,24 @@ impl Render {
         )
         .unwrap();
 
+        let bounding_box_verts = CpuAccessibleBuffer::from_iter(
+            &memory_allocator,
+            BufferUsage {
+                vertex_buffer: true,
+                ..BufferUsage::empty()
+            },
+            false,
+            BoxVertex::list().iter().cloned(),
+        )
+        .unwrap();
+
         let mut viewport = Viewport {
             origin: [0.0, 0.0],
             dimensions: [0.0, 0.0],
             depth_range: 0.0..1.0,
         };
 
-        let framebuffers = Render::window_size_dependent_setup(
+        let (framebuffers, albedo_buffer, normal_buffer) = Render::window_size_dependent_setup(
             &memory_allocator,
             &images,
             render_pass.clone(),
@@ -321,10 +368,33 @@ impl Render {
                 ..BufferUsage::empty()
             },
             false,
-            voxel_frag::ty::Camera {
-                invProj: [[0.0; 4]; 4],
-                invView: [[0.0; 4]; 4],
-                camPos: [0.0; 3],
+            voxel_vert::ty::Camera {
+                view: identity::<f32, 4>().into(),
+                proj: identity::<f32, 4>().into(),
+                pos: [0.0, 0.0, 0.0],
+            },
+        )
+        .unwrap();
+
+        let camera_layout = voxel_pipeline
+            .layout()
+            .set_layouts()
+            .get(0)
+            .unwrap()
+            .clone();
+        let camera_set = PersistentDescriptorSet::new(
+            &descriptor_set_allocator,
+            camera_layout.clone(),
+            [WriteDescriptorSet::buffer(0, camera_buffer.clone())],
+        )
+        .unwrap();
+
+        let voxel_sampler = Sampler::new(
+            device.clone(),
+            SamplerCreateInfo {
+                mag_filter: Filter::Nearest,
+                min_filter: Filter::Nearest,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -350,15 +420,24 @@ impl Render {
             render_pass,
             voxel_pipeline,
             dummy_verts,
+            bounding_box_verts,
             viewport,
-            framebuffers,
             render_stage,
             commands,
             image_index,
             acquire_future,
 
+            framebuffers,
+            albedo_buffer,
+            normal_buffer,
+
             camera_buffer,
+            camera_set,
             aspect_ratio,
+
+            voxel_texture: None,
+            voxel_sampler,
+            voxel_set: None,
         }
     }
 
@@ -370,21 +449,95 @@ impl Render {
             .unwrap()
     }
 
-    pub fn set_camera(&mut self, camera: &Camera) -> bool {
-        match self.camera_buffer.write() {
-            Ok(mut content) => {
-                let (inv_proj, inv_view) = camera.get_matrices();
-                content.camPos = camera.position;
-                content.invProj = *inv_proj;
-                content.invView = *inv_view;
+    pub fn set_camera(&mut self, camera: &Camera) {
+        let camera_buffer = CpuAccessibleBuffer::from_data(
+            &self.memory_allocator,
+            BufferUsage {
+                uniform_buffer: true,
+                ..BufferUsage::empty()
+            },
+            false,
+            voxel_vert::ty::Camera {
+                view: camera.view_matrix().into(),
+                proj: camera.proj_matrix().into(),
+                pos: camera.position.into(),
+            },
+        )
+        .unwrap();
+        self.camera_buffer = camera_buffer;
 
-                return true;
-            }
-            Err(_) => return false,
-        }
+        let camera_layout = self.voxel_pipeline.layout().set_layouts().get(0).unwrap();
+        let camera_set = PersistentDescriptorSet::new(
+            &self.descriptor_set_allocator,
+            camera_layout.clone(),
+            [WriteDescriptorSet::buffer(0, self.camera_buffer.clone())],
+        )
+        .unwrap();
+        self.camera_set = camera_set;
     }
 
-    pub fn render(&mut self) {
+    pub fn upload_voxel_texture(
+        &mut self,
+        model: &Model,
+        previous_frame_end: &mut Option<Box<dyn GpuFuture>>,
+    ) {
+        // Create a command buffer for uploading the texture
+        let mut upload_cmd = AutoCommandBufferBuilder::primary(
+            &self.command_buffer_allocator,
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        let voxel_image = ImmutableImage::from_iter(
+            &self.memory_allocator,
+            model.voxels.iter().cloned(),
+            ImageDimensions::Dim3d {
+                width: model.size.x,
+                height: model.size.y,
+                depth: model.size.z,
+            },
+            MipmapsCount::One,
+            Format::R8_UINT,
+            &mut upload_cmd,
+        )
+        .unwrap();
+
+        let upload_buffer = upload_cmd.build().unwrap();
+
+        // Execute the upload and wait for it
+        let mut local_future: Option<Box<dyn GpuFuture>> =
+            Some(Box::new(sync::now(self.device.clone())) as Box<dyn GpuFuture>);
+        mem::swap(&mut local_future, previous_frame_end);
+
+        let future = local_future
+            .take()
+            .unwrap()
+            .then_execute(self.queue.clone(), upload_buffer)
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap();
+
+        future.wait(None).unwrap();
+        *previous_frame_end = Some(Box::new(future) as Box<_>);
+
+        let voxel_layout = self.voxel_pipeline.layout().set_layouts().get(1).unwrap();
+        let voxel_set = PersistentDescriptorSet::new(
+            &self.descriptor_set_allocator,
+            voxel_layout.clone(),
+            [WriteDescriptorSet::image_view_sampler(
+                0,
+                ImageView::new_default(voxel_image.clone()).unwrap(),
+                self.voxel_sampler.clone(),
+            )],
+        )
+        .unwrap();
+
+        self.voxel_texture = Some(ImageView::new_default(voxel_image).unwrap());
+        self.voxel_set = Some(voxel_set);
+    }
+
+    pub fn render(&mut self, model: &Model) {
         match self.render_stage {
             RenderStage::Render => {} // Continue
             RenderStage::NeedsRedraw => {
@@ -400,13 +553,25 @@ impl Render {
             }
         }
 
-        let voxel_layout = self.voxel_pipeline.layout().set_layouts().get(0).unwrap();
-        let voxel_set = PersistentDescriptorSet::new(
-            &self.descriptor_set_allocator,
-            voxel_layout.clone(),
-            [WriteDescriptorSet::buffer(0, self.camera_buffer.clone())],
+        let instance_len = 1;
+        let mut instances = Vec::new();
+        instances.push(model.get_draw());
+        let instance_buffer = CpuAccessibleBuffer::from_iter(
+            &self.memory_allocator,
+            BufferUsage {
+                vertex_buffer: true,
+                ..BufferUsage::empty()
+            },
+            false,
+            instances.into_iter(),
         )
         .unwrap();
+
+        // Use the pre-uploaded voxel texture
+        let voxel_set = self
+            .voxel_set
+            .as_ref()
+            .expect("Voxel texture must be uploaded before rendering");
 
         self.commands
             .as_mut()
@@ -417,10 +582,13 @@ impl Render {
                 PipelineBindPoint::Graphics,
                 self.voxel_pipeline.layout().clone(),
                 0,
-                voxel_set.clone(),
+                (self.camera_set.clone(), voxel_set.clone()),
             )
-            .bind_vertex_buffers(0, self.dummy_verts.clone())
-            .draw(self.dummy_verts.len() as u32, 1, 0, 0)
+            .bind_vertex_buffers(
+                0,
+                (self.bounding_box_verts.clone(), instance_buffer.clone()),
+            )
+            .draw(self.bounding_box_verts.len() as u32, instance_len, 0, 0)
             .unwrap();
     }
 
@@ -517,7 +685,12 @@ impl Render {
             return;
         }
 
-        let clear_values = vec![Some([0.0, 0.0, 0.0, 1.0].into()), Some(1.0.into())];
+        let clear_values = vec![
+            Some([0.0, 0.0, 0.0, 1.0].into()),
+            Some(1.0.into()),
+            Some([0.0, 0.0, 0.0, 1.0].into()),
+            Some([0.0, 0.0, 0.0, 1.0].into()),
+        ];
 
         let mut commands = AutoCommandBufferBuilder::primary(
             &self.command_buffer_allocator,
@@ -567,17 +740,20 @@ impl Render {
             Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
         };
 
-        let new_framebuffers = Render::window_size_dependent_setup(
-            &self.memory_allocator,
-            &new_images,
-            self.render_pass.clone(),
-            &mut self.viewport,
-        );
+        let (new_framebuffers, new_albedo_buffer, new_normal_buffer) =
+            Render::window_size_dependent_setup(
+                &self.memory_allocator,
+                &new_images,
+                self.render_pass.clone(),
+                &mut self.viewport,
+            );
 
         let aspect_ratio = window.inner_size().width as f32 / window.inner_size().height as f32;
 
         self.swapchain = new_swapchain;
         self.framebuffers = new_framebuffers;
+        self.albedo_buffer = new_albedo_buffer;
+        self.normal_buffer = new_normal_buffer;
         self.render_stage = RenderStage::Stopped;
         self.aspect_ratio = aspect_ratio;
     }
@@ -587,12 +763,26 @@ impl Render {
         images: &[Arc<SwapchainImage>],
         render_pass: Arc<RenderPass>,
         viewport: &mut Viewport,
-    ) -> Vec<Arc<Framebuffer>> {
+    ) -> (
+        Vec<Arc<Framebuffer>>,
+        Arc<ImageView<AttachmentImage>>,
+        Arc<ImageView<AttachmentImage>>,
+    ) {
         let dimensions = images[0].dimensions().width_height();
         viewport.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
 
         let depth_buffer = ImageView::new_default(
             AttachmentImage::transient(allocator, dimensions, Format::D16_UNORM).unwrap(),
+        )
+        .unwrap();
+
+        let albedo_buffer = ImageView::new_default(
+            AttachmentImage::transient(allocator, dimensions, Format::R8G8B8A8_SRGB).unwrap(),
+        )
+        .unwrap();
+
+        let normal_buffer = ImageView::new_default(
+            AttachmentImage::transient(allocator, dimensions, Format::R16G16B16A16_SFLOAT).unwrap(),
         )
         .unwrap();
 
@@ -603,7 +793,12 @@ impl Render {
                 Framebuffer::new(
                     render_pass.clone(),
                     FramebufferCreateInfo {
-                        attachments: vec![view, depth_buffer.clone()],
+                        attachments: vec![
+                            view,
+                            depth_buffer.clone(),
+                            albedo_buffer.clone(),
+                            normal_buffer.clone(),
+                        ],
                         ..Default::default()
                     },
                 )
@@ -611,6 +806,6 @@ impl Render {
             })
             .collect::<Vec<_>>();
 
-        framebuffers
+        (framebuffers, albedo_buffer, normal_buffer)
     }
 }

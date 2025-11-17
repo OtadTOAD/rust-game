@@ -70,6 +70,10 @@ impl InputManager {
         self.mouse_delta
     }
 
+    pub fn reset_mouse_delta(&mut self) {
+        self.mouse_delta = (0.0, 0.0);
+    }
+
     pub fn on_event(&mut self, event: InputEvent) {
         match event {
             InputEvent::KeyReleased(keycode) => {
