@@ -49,6 +49,24 @@ bool voxelDDA(vec3 ro, vec3 rd, vec3 min_b, vec3 max_b, ivec3 grid_size, out ive
     ivec3 voxel = ivec3(floor(pos_in_grid));
     voxel = clamp(voxel, ivec3(0), grid_size - ivec3(1));
 
+    vec3 hit_normal = vec3(0.0);
+    if (t_in > 0.0) {
+        vec3 hit_point = ro + rd * t_in;
+        vec3 center = (min_b + max_b) * 0.5;
+        vec3 to_hit = hit_point - center;
+        vec3 half_size = (max_b - min_b) * 0.5;
+        vec3 abs_to_hit = abs(to_hit);
+        
+        if (abs_to_hit.x / half_size.x > abs_to_hit.y / half_size.y && 
+            abs_to_hit.x / half_size.x > abs_to_hit.z / half_size.z) {
+            hit_normal = vec3(sign(to_hit.x), 0.0, 0.0);
+        } else if (abs_to_hit.y / half_size.y > abs_to_hit.z / half_size.z) {
+            hit_normal = vec3(0.0, sign(to_hit.y), 0.0);
+        } else {
+            hit_normal = vec3(0.0, 0.0, sign(to_hit.z));
+        }
+    }
+
     ivec3 step;
     vec3 t_max;
     vec3 t_delta;
@@ -69,7 +87,6 @@ bool voxelDDA(vec3 ro, vec3 rd, vec3 min_b, vec3 max_b, ivec3 grid_size, out ive
     }
 
     float t = t_in;
-    vec3 hit_normal = vec3(0.0);
     
     while (t <= t_out) {
         
@@ -151,5 +168,5 @@ void main() {
     // G-buffer
     out_albedo = vec4(albedo, 1.0);
     out_normal = vec4(normal_world * 0.5 + 0.5, 1.0); 
-    out_color = vec4(albedo * lighting, 1.0);
+    out_color = vec4(out_normal.xyz, 1.0);
 }
