@@ -154,6 +154,15 @@ void main() {
         discard;
     }
 
+    // We need to manually write to depth buffer since voxels don't generally fill out
+    // The entire bounding box, and we can't know depth before DDA.
+    // Not most optimal, since this will only cull fragments after this shader stage,
+    // but works for now. Since we at least skip lighting and output for missed rays,
+    // it should still be a win.
+    vec3 hit_pos_world = cam.pos + rd_world * t_hit;
+    vec4 clip_pos = cam.proj * cam.view * vec4(hit_pos_world, 1.0);
+    gl_FragDepth = (clip_pos.z / clip_pos.w) * 0.5 + 0.5;
+
     vec3 normal_world = normalize(mat3(transpose(in_instance_inv_model)) * normal_local);
 
     // TODO: Use voxel idx to look up material in pallette
@@ -162,11 +171,11 @@ void main() {
     // Basic directional lighting for testing
     vec3 light_dir = normalize(vec3(0.5, -0.5, 0.5));
     float diffuse = max(dot(normal_world, light_dir), 0.0);
-    float ambient = 0.2;
+    float ambient = 0.5;
     float lighting = ambient + diffuse * (1.0 - ambient);
     
     // G-buffer
     out_albedo = vec4(albedo, 1.0);
     out_normal = vec4(normal_world * 0.5 + 0.5, 1.0); 
-    out_color = vec4(out_normal.xyz, 1.0);
+    out_color = vec4(albedo * lighting, 1.0);
 }
