@@ -1,7 +1,9 @@
 #version 450
 
 layout(location = 0) in vec3 in_world_pos;
-layout(location = 1) in mat4 in_instance_inv_model;
+layout(location = 1) in mat4 in_model;
+layout(location = 5) in mat4 in_model_inv;
+layout(location = 9) in mat4 in_model_inv_pose;
 
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec4 out_albedo;
@@ -137,10 +139,10 @@ void main() {
 
     ivec3 grid_size = textureSize(voxel_texture, 0);
 
-    vec3 ro_unit = vec3(in_instance_inv_model * vec4(cam.pos, 1.0));
+    vec3 ro_unit = vec3(in_model_inv * vec4(cam.pos, 1.0));
     vec3 ro_local = (ro_unit + vec3(0.5)) * vec3(grid_size);
     
-    vec3 in_pos_unit = vec3(in_instance_inv_model * vec4(in_world_pos, 1.0));
+    vec3 in_pos_unit = vec3(in_model_inv * vec4(in_world_pos, 1.0));
     vec3 in_pos_local = (in_pos_unit + vec3(0.5)) * vec3(grid_size);
     vec3 rd_local = normalize(in_pos_local - ro_local);
 
@@ -159,11 +161,14 @@ void main() {
     // Not most optimal, since this will only cull fragments after this shader stage,
     // but works for now. Since we at least skip lighting and output for missed rays,
     // it should still be a win.
-    vec3 hit_pos_world = cam.pos + rd_world * t_hit;
+    vec3 hit_pos_local = ro_local + rd_local * t_hit;
+    vec3 hit_pos_unit = (hit_pos_local / vec3(grid_size)) - vec3(0.5);
+    vec3 hit_pos_world = vec3(in_model * vec4(hit_pos_unit, 1.0));
+
     vec4 clip_pos = cam.proj * cam.view * vec4(hit_pos_world, 1.0);
     gl_FragDepth = (clip_pos.z / clip_pos.w) * 0.5 + 0.5;
 
-    vec3 normal_world = normalize(mat3(transpose(in_instance_inv_model)) * normal_local);
+    vec3 normal_world = normalize(mat3(in_model_inv_pose) * normal_local);
 
     // TODO: Use voxel idx to look up material in pallette
     vec3 albedo = vec3(1.0, 0.0, 0.0);
@@ -171,8 +176,11 @@ void main() {
     // Basic directional lighting for testing
     vec3 light_dir = normalize(vec3(0.5, -0.5, 0.5));
     float diffuse = max(dot(normal_world, light_dir), 0.0);
-    float ambient = 0.5;
-    float lighting = ambient + diffuse * (1.0 - ambient);
+    diffuse = pow(diffuse, 0.3);
+    float ambient = 0.25;
+    vec3 axis_factor = abs(normal_world);
+    float axis_variation = axis_factor.x * 0.95 + axis_factor.y * 1.0 + axis_factor.z * 0.90;
+    float lighting = (ambient + diffuse * (1.0 - ambient)) * axis_variation;
     
     // G-buffer
     out_albedo = vec4(albedo, 1.0);

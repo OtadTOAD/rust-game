@@ -68,7 +68,7 @@ fn main() {
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(PHYSICS_STEP_MS));
-                let e = engine_physics.write().unwrap();
+                let mut e = engine_physics.write().unwrap();
                 e.tick(PHYSICS_STEP_SEC);
             }
         });

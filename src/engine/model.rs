@@ -4,8 +4,9 @@ use nalgebra_glm::{Quat, U32Vec3, Vec3};
 #[repr(C)]
 #[derive(Clone, Copy, Zeroable, Pod, Default)]
 pub struct DrawModel {
-    pub in_instance_model: [[f32; 4]; 4],
-    pub in_instance_inv_model: [[f32; 4]; 4],
+    pub in_model: [[f32; 4]; 4],
+    pub in_model_inv: [[f32; 4]; 4],
+    pub in_model_inv_pose: [[f32; 4]; 4],
 }
 
 pub struct Model {
@@ -55,10 +56,11 @@ impl Model {
         ));
 
         let model_matrix = translation * nalgebra_glm::quat_to_mat4(&self.rotation) * scale;
-
+        // TODO: Precompute these values instead of calcuating them every frame
         DrawModel {
-            in_instance_model: model_matrix.into(),
-            in_instance_inv_model: model_matrix.try_inverse().unwrap().into(),
+            in_model: model_matrix.into(),
+            in_model_inv: model_matrix.try_inverse().unwrap().into(),
+            in_model_inv_pose: model_matrix.try_inverse().unwrap().transpose().into(),
         }
     }
 }

@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 vulkano::impl_vertex!(DummyVertex, position);
 vulkano::impl_vertex!(BoxVertex, in_position);
-vulkano::impl_vertex!(DrawModel, in_instance_model, in_instance_inv_model);
+vulkano::impl_vertex!(DrawModel, in_model, in_model_inv, in_model_inv_pose);
 
 mod voxel_vert {
     vulkano_shaders::shader! {
