@@ -157,7 +157,7 @@ void main() {
     }
 
     // We need to manually write to depth buffer since voxels don't generally fill out
-    // The entire bounding box, and we can't know depth before DDA.
+    // the entire bounding box, and we can't know depth before DDA.
     // Not most optimal, since this will only cull fragments after this shader stage,
     // but works for now. Since we at least skip lighting and output for missed rays,
     // it should still be a win.
