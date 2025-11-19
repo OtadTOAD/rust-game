@@ -176,8 +176,7 @@ void main() {
     // Basic directional lighting for testing
     vec3 light_dir = normalize(vec3(0.5, -0.5, 0.5));
     float diffuse = max(dot(normal_world, light_dir), 0.0);
-    diffuse = pow(diffuse, 0.3);
-    float ambient = 0.25;
+    float ambient = 0.5;
     vec3 axis_factor = abs(normal_world);
     float axis_variation = axis_factor.x * 0.95 + axis_factor.y * 1.0 + axis_factor.z * 0.90;
     float lighting = (ambient + diffuse * (1.0 - ambient)) * axis_variation;
