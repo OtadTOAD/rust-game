@@ -38,6 +38,7 @@ bool intersectAABB(vec3 ro, vec3 rd, vec3 min_b, vec3 max_b, out float t0, out f
     return t1 >= max(t0, 0.0);
 }
 
+// A Fast Voxel Traversal Algorithm for Ray Tracing by John Amanatides & Andrew Woo
 // https://www.cs.yorku.ca/~amana/research/grid.pdf
 bool voxelDDA(vec3 ro, vec3 rd, vec3 min_b, vec3 max_b, ivec3 grid_size, out ivec3 hit_voxel, out float t_hit, out vec3 normal) {
     float t_in, t_out;

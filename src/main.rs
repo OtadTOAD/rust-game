@@ -54,6 +54,7 @@ fn main() {
     }
 
     // Upload voxel textures
+    /*
     {
         let mut previous_frame_end =
             Some(Box::new(sync::now(render.device.clone())) as Box<dyn GpuFuture>);
@@ -62,6 +63,7 @@ fn main() {
             render.upload_voxel_texture(model, &mut previous_frame_end);
         }
     }
+    */
 
     // Physics thread
     {
@@ -146,9 +148,24 @@ fn main() {
                     }
                 }
 
+                let mut e = engine_render.write().unwrap();
+                let mut dirty_models = vec![];
+
+                for model in e.models.iter_mut() {
+                    if !model.is_initialized {
+                        render.init_model(model);
+                    }
+                    if model.is_dirty {
+                        dirty_models.push(model);
+                    }
+                }
+
+                if !dirty_models.is_empty() {
+                    render.update_models(&mut dirty_models, &mut previous_frame_end);
+                }
+
                 render.start();
 
-                let e = engine_render.read().unwrap();
                 for model in e.models.iter() {
                     render.render(model);
                 }

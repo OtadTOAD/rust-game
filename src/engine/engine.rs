@@ -25,7 +25,9 @@ impl Engine {
 
     pub fn init(&mut self) {
         let model = Model::new(U32Vec3::new(16, 16, 16), Vec3::new(0.0, 0.0, 0.0));
+        let model2: Model = Model::new(U32Vec3::new(8, 8, 8), Vec3::new(15.0, 0.0, 0.0));
         self.models.push(model);
+        self.models.push(model2);
 
         println!("Engine initialized");
     }

@@ -5,8 +5,8 @@ use nalgebra_glm::identity;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo,
-    SubpassContents,
+    AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo, PrimaryAutoCommandBuffer,
+    RenderPassBeginInfo, SubpassContents,
 };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
@@ -476,6 +476,67 @@ impl Render {
         self.camera_set = camera_set;
     }
 
+    pub fn init_model(&mut self, model: &mut Model) {
+        model.init_model(
+            self.voxel_pipeline.clone(),
+            &self.descriptor_set_allocator,
+            &self.memory_allocator,
+            self.voxel_sampler.clone(),
+            self.queue.clone(),
+        );
+    }
+
+    pub fn update_models(
+        &mut self,
+        dirty_models: &mut Vec<&mut Model>,
+        previous_frame_end: &mut Option<Box<dyn GpuFuture>>,
+    ) {
+        let mut upload_cmd = AutoCommandBufferBuilder::primary(
+            &self.command_buffer_allocator,
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        for model in dirty_models.iter_mut() {
+            let voxel_staging = CpuAccessibleBuffer::from_iter(
+                &self.memory_allocator,
+                BufferUsage {
+                    transfer_src: true,
+                    ..BufferUsage::empty()
+                },
+                false,
+                model.voxels.iter().cloned(),
+            )
+            .unwrap();
+
+            upload_cmd
+                .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+                    voxel_staging.clone(),
+                    model.voxel_texture.as_ref().unwrap().image().clone(),
+                ))
+                .unwrap();
+
+            model.is_dirty = false;
+        }
+        let upload_buffer = upload_cmd.build().unwrap();
+
+        let mut local_future: Option<Box<dyn GpuFuture>> =
+            Some(Box::new(sync::now(self.device.clone())) as Box<dyn GpuFuture>);
+        mem::swap(&mut local_future, previous_frame_end);
+
+        let future = local_future
+            .take()
+            .unwrap()
+            .then_execute(self.queue.clone(), upload_buffer)
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap();
+
+        future.wait(None).unwrap();
+        *previous_frame_end = Some(Box::new(future) as Box<_>);
+    }
+
     pub fn upload_voxel_texture(
         &mut self,
         model: &Model,
@@ -567,8 +628,7 @@ impl Render {
         )
         .unwrap();
 
-        // Use the pre-uploaded voxel texture
-        let voxel_set = self
+        let voxel_set = model
             .voxel_set
             .as_ref()
             .expect("Voxel texture must be uploaded before rendering");
