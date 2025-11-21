@@ -3,15 +3,8 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use nalgebra_glm::{Quat, U32Vec3, Vec3};
 use vulkano::{
-    descriptor_set::{
-        PersistentDescriptorSet, WriteDescriptorSet, allocator::StandardDescriptorSetAllocator,
-    },
-    device::Queue,
-    format::Format,
-    image::{ImageDimensions, StorageImage, view::ImageView},
-    memory::allocator::StandardMemoryAllocator,
-    pipeline::{GraphicsPipeline, Pipeline},
-    sampler::Sampler,
+    descriptor_set::PersistentDescriptorSet,
+    image::{StorageImage, view::ImageView},
 };
 
 #[repr(C)]
@@ -89,44 +82,6 @@ impl Model {
             is_initialized: false,
             is_dirty: false,
         }
-    }
-
-    pub fn init_model(
-        &mut self,
-        pipeline: Arc<GraphicsPipeline>,
-        set_allocator: &StandardDescriptorSetAllocator,
-        mem_allocator: &StandardMemoryAllocator,
-        sampler: Arc<Sampler>,
-        queue: Arc<Queue>,
-    ) {
-        let voxel_image = StorageImage::new(
-            mem_allocator,
-            ImageDimensions::Dim3d {
-                width: self.size.x,
-                height: self.size.y,
-                depth: self.size.z,
-            },
-            Format::R8_UINT,
-            [queue.queue_family_index()],
-        )
-        .unwrap();
-
-        let voxel_layout = pipeline.layout().set_layouts().get(1).unwrap();
-        let voxel_set = PersistentDescriptorSet::new(
-            set_allocator,
-            voxel_layout.clone(),
-            [WriteDescriptorSet::image_view_sampler(
-                0,
-                ImageView::new_default(voxel_image.clone()).unwrap(),
-                sampler.clone(),
-            )],
-        )
-        .unwrap();
-
-        self.voxel_texture = Some(ImageView::new_default(voxel_image.clone()).unwrap());
-        self.voxel_set = Some(voxel_set);
-        self.is_initialized = true;
-        self.is_dirty = true;
     }
 
     pub fn get_draw(&self) -> DrawModel {

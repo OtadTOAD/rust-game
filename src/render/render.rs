@@ -14,9 +14,7 @@ use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
-use vulkano::image::{
-    AttachmentImage, ImageAccess, ImageDimensions, ImmutableImage, MipmapsCount, SwapchainImage,
-};
+use vulkano::image::{AttachmentImage, ImageAccess, ImageDimensions, StorageImage, SwapchainImage};
 use vulkano::instance::debug::{
     DebugUtilsMessageSeverity, DebugUtilsMessageType, DebugUtilsMessenger,
     DebugUtilsMessengerCreateInfo,
@@ -109,9 +107,7 @@ pub struct Render {
     camera_buffer: Arc<CpuAccessibleBuffer<voxel_vert::ty::Camera>>,
     camera_set: Arc<PersistentDescriptorSet>,
 
-    voxel_texture: Option<Arc<ImageView<ImmutableImage>>>,
     voxel_sampler: Arc<Sampler>,
-    voxel_set: Option<Arc<PersistentDescriptorSet>>,
 }
 
 impl Render {
@@ -435,9 +431,7 @@ impl Render {
             camera_set,
             aspect_ratio,
 
-            voxel_texture: None,
             voxel_sampler,
-            voxel_set: None,
         }
     }
 
@@ -477,13 +471,34 @@ impl Render {
     }
 
     pub fn init_model(&mut self, model: &mut Model) {
-        model.init_model(
-            self.voxel_pipeline.clone(),
-            &self.descriptor_set_allocator,
+        let voxel_image = StorageImage::new(
             &self.memory_allocator,
-            self.voxel_sampler.clone(),
-            self.queue.clone(),
-        );
+            ImageDimensions::Dim3d {
+                width: model.size.x,
+                height: model.size.y,
+                depth: model.size.z,
+            },
+            Format::R8_UINT,
+            [self.queue.queue_family_index()],
+        )
+        .unwrap();
+
+        let voxel_layout = self.voxel_pipeline.layout().set_layouts().get(1).unwrap();
+        let voxel_set = PersistentDescriptorSet::new(
+            &self.descriptor_set_allocator,
+            voxel_layout.clone(),
+            [WriteDescriptorSet::image_view_sampler(
+                0,
+                ImageView::new_default(voxel_image.clone()).unwrap(),
+                self.voxel_sampler.clone(),
+            )],
+        )
+        .unwrap();
+
+        model.voxel_texture = Some(ImageView::new_default(voxel_image.clone()).unwrap());
+        model.voxel_set = Some(voxel_set);
+        model.is_initialized = true;
+        model.is_dirty = true;
     }
 
     pub fn update_models(
@@ -535,67 +550,6 @@ impl Render {
 
         future.wait(None).unwrap();
         *previous_frame_end = Some(Box::new(future) as Box<_>);
-    }
-
-    pub fn upload_voxel_texture(
-        &mut self,
-        model: &Model,
-        previous_frame_end: &mut Option<Box<dyn GpuFuture>>,
-    ) {
-        // Create a command buffer for uploading the texture
-        let mut upload_cmd = AutoCommandBufferBuilder::primary(
-            &self.command_buffer_allocator,
-            self.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
-
-        let voxel_image = ImmutableImage::from_iter(
-            &self.memory_allocator,
-            model.voxels.iter().cloned(),
-            ImageDimensions::Dim3d {
-                width: model.size.x,
-                height: model.size.y,
-                depth: model.size.z,
-            },
-            MipmapsCount::One,
-            Format::R8_UINT,
-            &mut upload_cmd,
-        )
-        .unwrap();
-
-        let upload_buffer = upload_cmd.build().unwrap();
-
-        // Execute the upload and wait for it
-        let mut local_future: Option<Box<dyn GpuFuture>> =
-            Some(Box::new(sync::now(self.device.clone())) as Box<dyn GpuFuture>);
-        mem::swap(&mut local_future, previous_frame_end);
-
-        let future = local_future
-            .take()
-            .unwrap()
-            .then_execute(self.queue.clone(), upload_buffer)
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap();
-
-        future.wait(None).unwrap();
-        *previous_frame_end = Some(Box::new(future) as Box<_>);
-
-        let voxel_layout = self.voxel_pipeline.layout().set_layouts().get(1).unwrap();
-        let voxel_set = PersistentDescriptorSet::new(
-            &self.descriptor_set_allocator,
-            voxel_layout.clone(),
-            [WriteDescriptorSet::image_view_sampler(
-                0,
-                ImageView::new_default(voxel_image.clone()).unwrap(),
-                self.voxel_sampler.clone(),
-            )],
-        )
-        .unwrap();
-
-        self.voxel_texture = Some(ImageView::new_default(voxel_image).unwrap());
-        self.voxel_set = Some(voxel_set);
     }
 
     pub fn render(&mut self, model: &Model) {
