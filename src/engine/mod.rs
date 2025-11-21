@@ -2,6 +2,7 @@ mod camera;
 mod engine;
 mod input;
 mod model;
+mod terrain;
 
 pub use camera::Camera;
 pub use engine::Engine;

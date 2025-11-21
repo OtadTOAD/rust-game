@@ -30,7 +30,7 @@ fn get_draw_model_matrix(position: &Vec3, size: &U32Vec3, rotation: &Quat) -> Dr
 
 pub struct Model {
     pub size: U32Vec3,
-    //pub position: Vec3,
+    pub position: Vec3,
     pub rotation: Quat,
     pub voxels: Vec<u8>,
 
@@ -40,7 +40,7 @@ pub struct Model {
     pub _draw: DrawModel,
 
     pub is_initialized: bool,
-    pub is_dirty: bool,
+    pub is_dirty: bool, // Keep in mind, this is only when voxels change. Not position/rotation
 }
 
 impl Model {
@@ -70,7 +70,7 @@ impl Model {
 
         Model {
             rotation,
-            //position,
+            position,
             voxels,
             size,
 
@@ -82,6 +82,16 @@ impl Model {
             is_initialized: false,
             is_dirty: false,
         }
+    }
+
+    pub fn translate(&mut self, delta: &Vec3) {
+        self.position += delta;
+        self._draw = get_draw_model_matrix(&self.position, &self.size, &self.rotation);
+    }
+
+    pub fn rotate(&mut self, delta: &Quat) {
+        self.rotation *= delta;
+        self._draw = get_draw_model_matrix(&self.position, &self.size, &self.rotation);
     }
 
     pub fn get_draw(&self) -> DrawModel {

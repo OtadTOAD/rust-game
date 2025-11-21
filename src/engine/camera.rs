@@ -1,11 +1,13 @@
+use std::f32::consts::PI;
+
 use nalgebra_glm::{
-    Mat4, Quat, Vec3, infinite_perspective_rh_zo, inverse, quat_angle_axis, quat_rotate_vec3,
-    quat_to_mat4, translation,
+    Mat4, Quat, Vec3, infinite_perspective_rh_zo, inverse, quat_angle, quat_angle_axis,
+    quat_rotate_vec3, quat_to_mat4, translation,
 };
 
 use crate::engine::input::InputManager;
 
-const MOVE_SPEED: f32 = 5.0;
+const MOVE_SPEED: f32 = 15.0;
 const ROTATE_SPEED: f32 = 0.01;
 
 const VEC_Z: Vec3 = Vec3::new(0.0, 0.0, 1.0);
@@ -27,7 +29,7 @@ pub struct Camera {
 impl Camera {
     pub fn new(position: Vec3, fov_deg: f32, aspect_ratio: f32) -> Self {
         Camera {
-            rotation: Quat::identity(),
+            rotation: quat_angle_axis(PI, &VEC_Z),
             aspect_ratio,
             position,
             fov: fov_deg.to_radians(),
@@ -54,9 +56,9 @@ impl Camera {
     */
 
     pub fn view_matrix(&self) -> Mat4 {
-        let rotation = quat_to_mat4(&self.rotation);
-        let translation_mat = translation(&self.position);
-        inverse(&(translation_mat * rotation))
+        let rotation = quat_to_mat4(&self.rotation.conjugate());
+        let translation_mat = translation(&-self.position);
+        rotation * translation_mat
     }
 
     pub fn proj_matrix(&self) -> Mat4 {
@@ -106,12 +108,11 @@ impl Camera {
             self.move_local(VEC_Y, MOVE_SPEED * delta_time as f32);
         }
 
+        println!("Camera position: {:?}", self.position);
+
         let (delta_x, delta_y) = input.get_mouse_delta();
         if delta_x != 0.0 || delta_y != 0.0 {
-            self.rotate(
-                -delta_x as f32 * ROTATE_SPEED,
-                delta_y as f32 * ROTATE_SPEED,
-            );
+            self.rotate(delta_x as f32 * ROTATE_SPEED, delta_y as f32 * ROTATE_SPEED);
         }
     }
 }

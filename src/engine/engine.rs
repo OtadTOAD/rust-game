@@ -1,17 +1,22 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
-use nalgebra_glm::{U32Vec3, Vec3};
+use nalgebra_glm::{IVec3, U32Vec3, Vec3};
 
 use crate::engine::{
     Camera,
     input::{Action, InputManager},
     model::Model,
+    terrain::{CHUNK_SIZE, generate_chunk_voxels},
 };
 
 pub struct Engine {
     pub input: Arc<Mutex<InputManager>>,
     pub camera: Arc<Mutex<Camera>>,
     pub models: Vec<Model>,
+    pub chunks: HashSet<IVec3>,
 }
 
 impl Engine {
@@ -20,6 +25,7 @@ impl Engine {
             models: Vec::new(),
             camera,
             input,
+            chunks: HashSet::new(),
         }
     }
 
@@ -37,13 +43,36 @@ impl Engine {
         let mut input = self.input.lock().unwrap();
 
         {
-            for model in self.models.iter_mut() {
-                model.rotation *= nalgebra_glm::quat(
-                    15.0f32.to_radians() * delta_time as f32,
-                    15.0f32.to_radians() * delta_time as f32,
-                    15.0f32.to_radians() * delta_time as f32,
-                    1.0,
-                );
+            let origin_pos = IVec3::new(
+                (camera.position.x as f32 / CHUNK_SIZE as f32).round() as i32,
+                (camera.position.y as f32 / CHUNK_SIZE as f32).round() as i32,
+                (camera.position.z as f32 / CHUNK_SIZE as f32).round() as i32,
+            );
+
+            for x in -2..=2 {
+                for y in -2..=2 {
+                    for z in -2..=2 {
+                        let chunk_pos = origin_pos + IVec3::new(x, y, z);
+                        if !self.chunks.contains(&chunk_pos) {
+                            self.chunks.insert(chunk_pos);
+
+                            let mut model = Model::new(
+                                U32Vec3::new(
+                                    CHUNK_SIZE as u32,
+                                    CHUNK_SIZE as u32,
+                                    CHUNK_SIZE as u32,
+                                ),
+                                Vec3::new(
+                                    chunk_pos.x as f32 * CHUNK_SIZE as f32,
+                                    chunk_pos.y as f32 * CHUNK_SIZE as f32,
+                                    chunk_pos.z as f32 * CHUNK_SIZE as f32,
+                                ),
+                            );
+                            model.voxels = generate_chunk_voxels(chunk_pos);
+                            self.models.push(model);
+                        }
+                    }
+                }
             }
         }
 
