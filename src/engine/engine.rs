@@ -19,6 +19,9 @@ pub struct Engine {
     pub chunks: HashSet<IVec3>,
 }
 
+const RENDER_CHUNK_DISTANCE: i32 = 4;
+const RENDER_CHUNK_DISTANCE_Y: (i32, i32) = (2, 1);
+
 impl Engine {
     pub fn new(input: Arc<Mutex<InputManager>>, camera: Arc<Mutex<Camera>>) -> Self {
         Engine {
@@ -49,9 +52,9 @@ impl Engine {
                 (camera.position.z as f32 / CHUNK_SIZE as f32).round() as i32,
             );
 
-            for x in -2..=2 {
-                for y in -2..=2 {
-                    for z in -2..=2 {
+            for x in -RENDER_CHUNK_DISTANCE..=RENDER_CHUNK_DISTANCE {
+                for y in -RENDER_CHUNK_DISTANCE_Y.0..=RENDER_CHUNK_DISTANCE_Y.1 {
+                    for z in -RENDER_CHUNK_DISTANCE..=RENDER_CHUNK_DISTANCE {
                         let chunk_pos = origin_pos + IVec3::new(x, y, z);
                         if !self.chunks.contains(&chunk_pos) {
                             self.chunks.insert(chunk_pos);

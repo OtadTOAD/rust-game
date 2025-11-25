@@ -3,6 +3,7 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use nalgebra_glm::{Quat, U32Vec3, Vec3};
 use vulkano::{
+    buffer::CpuAccessibleBuffer,
     descriptor_set::PersistentDescriptorSet,
     image::{StorageImage, view::ImageView},
 };
@@ -36,6 +37,7 @@ pub struct Model {
 
     pub voxel_texture: Option<Arc<ImageView<StorageImage>>>,
     pub voxel_set: Option<Arc<PersistentDescriptorSet>>,
+    pub inst_buffer: Option<Arc<CpuAccessibleBuffer<DrawModel>>>,
 
     pub _draw: DrawModel,
 
@@ -75,6 +77,7 @@ impl Model {
             size,
 
             voxel_texture: None,
+            inst_buffer: None,
             voxel_set: None,
 
             _draw: get_draw_model_matrix(&position, &size, &rotation),

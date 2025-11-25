@@ -166,7 +166,7 @@ fn main() {
 
                 render.start();
 
-                for model in e.models.iter() {
+                for model in e.models.iter_mut() {
                     render.render(model);
                 }
 

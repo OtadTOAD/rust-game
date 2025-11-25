@@ -552,7 +552,7 @@ impl Render {
         *previous_frame_end = Some(Box::new(future) as Box<_>);
     }
 
-    pub fn render(&mut self, model: &Model) {
+    pub fn render(&mut self, model: &mut Model) {
         match self.render_stage {
             RenderStage::Render => {} // Continue
             RenderStage::NeedsRedraw => {
@@ -568,19 +568,24 @@ impl Render {
             }
         }
 
-        let instance_len = 1;
-        let mut instances = Vec::new();
-        instances.push(model.get_draw());
-        let instance_buffer = CpuAccessibleBuffer::from_iter(
-            &self.memory_allocator,
-            BufferUsage {
-                vertex_buffer: true,
-                ..BufferUsage::empty()
-            },
-            false,
-            instances.into_iter(),
-        )
-        .unwrap();
+        let inst_buffer = {
+            if let Some(buffer) = model.inst_buffer.as_ref() {
+                buffer.clone()
+            } else {
+                let instance_buffer = CpuAccessibleBuffer::from_data(
+                    &self.memory_allocator,
+                    BufferUsage {
+                        vertex_buffer: true,
+                        ..BufferUsage::empty()
+                    },
+                    false,
+                    model.get_draw(),
+                )
+                .unwrap();
+                model.inst_buffer = Some(instance_buffer.clone());
+                instance_buffer
+            }
+        };
 
         let voxel_set = model
             .voxel_set
@@ -598,11 +603,8 @@ impl Render {
                 0,
                 (self.camera_set.clone(), voxel_set.clone()),
             )
-            .bind_vertex_buffers(
-                0,
-                (self.bounding_box_verts.clone(), instance_buffer.clone()),
-            )
-            .draw(self.bounding_box_verts.len() as u32, instance_len, 0, 0)
+            .bind_vertex_buffers(0, (self.bounding_box_verts.clone(), inst_buffer.clone()))
+            .draw(self.bounding_box_verts.len() as u32, 1, 0, 0)
             .unwrap();
     }
 

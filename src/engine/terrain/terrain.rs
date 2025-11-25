@@ -1,7 +1,7 @@
 use nalgebra_glm::IVec3;
 
 pub const CHUNK_SIZE: usize = 16;
-const FLOOR_HEIGHT: i32 = 8;
+const FLOOR_HEIGHT: i32 = 0;
 
 pub fn generate_chunk_voxels(pos: IVec3) -> Vec<u8> {
     let mut voxels = vec![0; (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as usize];

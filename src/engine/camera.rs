@@ -7,8 +7,8 @@ use nalgebra_glm::{
 
 use crate::engine::input::InputManager;
 
-const MOVE_SPEED: f32 = 15.0;
-const ROTATE_SPEED: f32 = 0.01;
+const MOVE_SPEED: f32 = 30.0;
+const ROTATE_SPEED: f32 = 0.025;
 
 const VEC_Z: Vec3 = Vec3::new(0.0, 0.0, 1.0);
 const VEC_X: Vec3 = Vec3::new(1.0, 0.0, 0.0);
