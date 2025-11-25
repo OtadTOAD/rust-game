@@ -149,25 +149,19 @@ fn main() {
                 }
 
                 let mut e = engine_render.write().unwrap();
-                let mut dirty_models = vec![];
-
-                for model in e.models.iter_mut() {
-                    if !model.is_initialized {
-                        render.init_model(model);
-                    }
-                    if model.is_dirty {
-                        dirty_models.push(model);
-                    }
-                }
-
-                if !dirty_models.is_empty() {
-                    render.update_models(&mut dirty_models, &mut previous_frame_end);
-                }
-
+                e.pre_render_tick(&mut render, &mut previous_frame_end);
                 render.start();
 
-                for model in e.models.iter_mut() {
-                    render.render(model);
+                for model in e.get_mut_models() {
+                    if let Some(model) = model {
+                        // Be careful of is_dirty check here - for now it works since only time voxels
+                        // are dirty is during initialization, but in future this might backfire.
+                        if model.is_dirty || !model.is_initialized {
+                            continue;
+                        }
+
+                        render.render(model);
+                    }
                 }
 
                 render.finish(&mut previous_frame_end);

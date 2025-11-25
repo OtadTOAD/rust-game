@@ -149,7 +149,7 @@ void main() {
 
     vec3 box_min = vec3(0.0);
     vec3 box_max = vec3(grid_size);
-    
+
     ivec3 hit;
     float t_hit;
     vec3 normal_local;
