@@ -9,7 +9,7 @@ use vulkano::sync::GpuFuture;
 
 use crate::{
     engine::{
-        Camera, DrawModel,
+        Camera,
         input::{Action, InputManager},
         model::Model,
         terrain::{CHUNK_SIZE, generate_chunk_voxels},

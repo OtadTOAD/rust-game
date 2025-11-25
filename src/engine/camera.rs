@@ -1,8 +1,8 @@
 use std::f32::consts::PI;
 
 use nalgebra_glm::{
-    Mat4, Quat, Vec3, infinite_perspective_rh_zo, inverse, quat_angle, quat_angle_axis,
-    quat_rotate_vec3, quat_to_mat4, translation,
+    Mat4, Quat, Vec3, infinite_perspective_rh_zo, inverse, quat_angle_axis, quat_rotate_vec3,
+    quat_to_mat4, translation,
 };
 
 use crate::engine::input::InputManager;
