@@ -278,7 +278,7 @@ impl Render {
                 depth: {
                     load: Clear,
                     store: DontCare,
-                    format: Format::D16_UNORM,
+                    format: Format::D32_SFLOAT,
                     samples: 1,
                 },
                 albedo: {
@@ -788,7 +788,7 @@ impl Render {
         viewport.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
 
         let depth_buffer = ImageView::new_default(
-            AttachmentImage::transient(allocator, dimensions, Format::D16_UNORM).unwrap(),
+            AttachmentImage::transient(allocator, dimensions, Format::D32_SFLOAT).unwrap(),
         )
         .unwrap();
 
